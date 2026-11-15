@@ -2471,36 +2471,69 @@ fn render_scene_display_inner(
         None
     };
     let s = TONE_DOWNSAMPLE as f32;
+    // The stages that look at one pixel alone: tone, then (without the guided
+    // mixer) colour.
+    let working_at = |x: usize, y: usize| -> [f32; 3] {
+        let fy = (y as f32 + 0.5) / s - 0.5;
+        let i = (y * w + x) * 4;
+        let rgb = [
+            f16_bits_to_f32(scene.half[i]),
+            f16_bits_to_f32(scene.half[i + 1]),
+            f16_bits_to_f32(scene.half[i + 2]),
+        ];
+        let e = region.as_ref().map(|(plane, pw, ph)| {
+            sample_plane_bilinear(plane, *pw, *ph, (x as f32 + 0.5) / s - 0.5, fy)
+        });
+        let [mut r, mut g, mut b] = tone.scene_to_working(rgb, e);
+        if guided_mixer.is_none()
+            && let Some((settings, curves)) = develop
+        {
+            let classification = tone.working_to_display([r, g, b]);
+            apply_color_linear_classified_in_space(
+                settings,
+                curves,
+                Some(classification),
+                true,
+                tone.working_space,
+                &mut r,
+                &mut g,
+                &mut b,
+            );
+        }
+        [r, g, b]
+    };
+    let write_display = |row: &mut [u16], x: usize, y: usize, working: [f32; 3]| {
+        let d = tone.working_to_display(working);
+        let o = x * 4;
+        row[o] = (d[0] * 65535.0 + 0.5) as u16;
+        row[o + 1] = (d[1] * 65535.0 + 0.5) as u16;
+        row[o + 2] = (d[2] * 65535.0 + 0.5) as u16;
+        row[o + 3] = scene.alpha16_at_index(y * w + x);
+    };
+
+    // Nothing reads a pixel's neighbours: render straight to the output,
+    // without a whole-image working buffer in between.
+    let needs_neighbours = guided_mixer.is_some()
+        || develop.is_some_and(|(settings, _)| {
+            settings.has_spatial_effects()
+                || settings.vignette.abs() > 0.001
+                || settings.has_detail()
+                || settings.has_locals()
+        });
+    if !needs_neighbours {
+        let mut out = vec![0u16; w * h * 4];
+        out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+            for x in 0..w {
+                write_display(row, x, y, working_at(x, y));
+            }
+        });
+        return out;
+    }
+
     let mut working = vec![[0.0f32; 3]; w * h];
     working.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        let fy = (y as f32 + 0.5) / s - 0.5;
         for (x, slot) in row.iter_mut().enumerate() {
-            let i = (y * w + x) * 4;
-            let rgb = [
-                f16_bits_to_f32(scene.half[i]),
-                f16_bits_to_f32(scene.half[i + 1]),
-                f16_bits_to_f32(scene.half[i + 2]),
-            ];
-            let e = region.as_ref().map(|(plane, pw, ph)| {
-                sample_plane_bilinear(plane, *pw, *ph, (x as f32 + 0.5) / s - 0.5, fy)
-            });
-            let [mut r, mut g, mut b] = tone.scene_to_working(rgb, e);
-            if guided_mixer.is_none()
-                && let Some((settings, curves)) = develop
-            {
-                let classification = tone.working_to_display([r, g, b]);
-                apply_color_linear_classified_in_space(
-                    settings,
-                    curves,
-                    Some(classification),
-                    true,
-                    tone.working_space,
-                    &mut r,
-                    &mut g,
-                    &mut b,
-                );
-            }
-            *slot = [r, g, b];
+            *slot = working_at(x, y);
         }
     });
 
@@ -2588,12 +2621,7 @@ fn render_scene_display_inner(
     let mut out = vec![0u16; w * h * 4];
     out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
         for x in 0..w {
-            let d = tone.working_to_display(working[y * w + x]);
-            let o = x * 4;
-            row[o] = (d[0] * 65535.0 + 0.5) as u16;
-            row[o + 1] = (d[1] * 65535.0 + 0.5) as u16;
-            row[o + 2] = (d[2] * 65535.0 + 0.5) as u16;
-            row[o + 3] = scene.alpha16_at_index(y * w + x);
+            write_display(row, x, y, working[y * w + x]);
         }
     });
     out
@@ -2644,11 +2672,7 @@ pub fn strip_scene_handled(settings: &DevelopSettings) -> DevelopSettings {
 /// Effects, Detail and Local Masks on one f32 working master and performs the
 /// output transform once. Identity sources retain the legacy tail so neutral
 /// and PTS behaviour remain bit-stable.
-pub(crate) fn apply_scene1_to_tilemap(
-    scene: &SceneSource,
-    settings: &DevelopSettings,
-    selection: Option<crate::develop::DevelopSelection>,
-) -> TileMap {
+pub(crate) fn apply_scene1_to_tilemap(scene: &SceneSource, settings: &DevelopSettings) -> TileMap {
     let tone = build_scene_tone_for_scene(settings, scene);
     let linear_develop = scene.look == BaseLook::Raw
         && (settings.has_color()
@@ -2685,26 +2709,24 @@ pub(crate) fn apply_scene1_to_tilemap(
         display.bump_all_revisions();
         return display;
     }
-    crate::develop::apply_to_tilemap_direct(&display, &rest, selection)
+    crate::develop::apply_to_tilemap_direct(&display, &rest, None)
 }
 
 /// Versioned scene renderer boundary. Existing projects retain Scene1 exactly;
 /// Develop3 goes through its validated typed graph. Legacy1 and Scene1 remain
 /// compatibility choices and are routed to the historical scene implementation.
-pub fn apply_scene_to_tilemap(
-    scene: &SceneSource,
-    settings: &DevelopSettings,
-    selection: Option<crate::develop::DevelopSelection>,
-) -> TileMap {
+///
+/// Renders the whole layer. With a selection, pass the result through
+/// [`crate::develop::keep_within_selection`]: the scene chain itself has no
+/// notion of one.
+pub fn apply_scene_to_tilemap(scene: &SceneSource, settings: &DevelopSettings) -> TileMap {
     match settings.develop_engine_version {
         crate::develop::DevelopEngineVersion::Develop3 => {
-            crate::develop2::execute_scene(scene, settings, selection)
+            crate::develop2::execute_scene(scene, settings)
                 .expect("the canonical Develop3 recipe must validate")
         }
         crate::develop::DevelopEngineVersion::Legacy1
-        | crate::develop::DevelopEngineVersion::Scene1 => {
-            apply_scene1_to_tilemap(scene, settings, selection)
-        }
+        | crate::develop::DevelopEngineVersion::Scene1 => apply_scene1_to_tilemap(scene, settings),
     }
 }
 
@@ -3622,6 +3644,55 @@ mod tests {
     }
 
     #[test]
+    fn light_sliders_stay_inside_the_selection() {
+        // Exposure on the left half only: the right half of the layer must come
+        // out as it went in, for a plain layer and for a RAW master alike.
+        let (w, h) = (300u32, 40u32);
+        let px16: Vec<u16> = (0..w * h)
+            .flat_map(|i| {
+                let v = (8_000 + (i % w) * 120) as u16;
+                [v, v / 2 + 4_000, v / 3 + 9_000, u16::MAX]
+            })
+            .collect();
+        let source = TileMap::from_rgba16(&px16, w, h);
+        let mut mask = iai_doc::selection::Selection::new(w, h);
+        mask.select_rect(0, 0, w / 2, h);
+        let selection = crate::develop::DevelopSelection {
+            selection: std::sync::Arc::new(mask),
+            layer_offset: (0, 0),
+        };
+        let push = DevelopSettings {
+            exposure: 40.0,
+            ..settings()
+        };
+        let plain = SceneSource::from_display_tiles(&source);
+        let mut raw = SceneSource::from_display_tiles(&source);
+        raw.look = BaseLook::Raw;
+        for (name, scene) in [("plain", plain), ("raw", raw)] {
+            let out = crate::develop::keep_within_selection(
+                apply_scene_to_tilemap(&scene, &push),
+                &source,
+                &selection,
+            );
+            for x in [0, 40, w / 2 - 1] {
+                assert_ne!(
+                    out.get_pixel16(x, 10),
+                    source.get_pixel16(x, 10),
+                    "{name}: x={x} is selected and must change"
+                );
+            }
+            for x in [w / 2, 200, w - 1] {
+                assert_eq!(
+                    out.get_pixel16(x, 10),
+                    source.get_pixel16(x, 10),
+                    "{name}: x={x} is outside the selection"
+                );
+                assert_eq!(out.get_pixel(x, 10), source.get_pixel(x, 10));
+            }
+        }
+    }
+
+    #[test]
     fn identity_scene_commit_preserves_cutout_alpha_exactly() {
         // Layer-via-Copy leaves the source RGB under alpha=0. Develop must adjust
         // colour without making that hidden background visible again on commit.
@@ -3643,7 +3714,6 @@ mod tests {
                 exposure: 20.0,
                 ..settings()
             },
-            None,
         );
 
         for (x, expected) in alpha.into_iter().enumerate() {
@@ -4112,7 +4182,7 @@ mod tests {
                 scene.set_rgb(x, y, [v, v * 0.8, v * 1.2]);
             }
         }
-        let tiles = apply_scene_to_tilemap(&scene, &settings(), None);
+        let tiles = apply_scene_to_tilemap(&scene, &settings());
         let direct = render_default_look(&scene);
         for y in 0..8u32 {
             for x in 0..8u32 {
@@ -4254,14 +4324,13 @@ mod tests {
                 scene.set_rgb(x, y, [0.30, 0.08, 0.06]); // a saturated red patch
             }
         }
-        let plain = apply_scene_to_tilemap(&scene, &settings(), None);
+        let plain = apply_scene_to_tilemap(&scene, &settings());
         let saturated = apply_scene_to_tilemap(
             &scene,
             &DevelopSettings {
                 saturation: 150.0,
                 ..settings()
             },
-            None,
         );
         let (r0, g0, _b0, _) = plain.get_pixel16(1, 1);
         let (r1, g1, _b1, _) = saturated.get_pixel16(1, 1);
@@ -4278,14 +4347,13 @@ mod tests {
                 scene.set_rgb(x, y, [0.32, 0.12, 0.06]);
             }
         }
-        let plain = apply_scene_to_tilemap(&scene, &settings(), None);
+        let plain = apply_scene_to_tilemap(&scene, &settings());
         let textured = apply_scene_to_tilemap(
             &scene,
             &DevelopSettings {
                 texture: 200.0,
                 ..settings()
             },
-            None,
         );
         assert_eq!(
             plain.get_pixel16(6, 6),
@@ -4309,7 +4377,6 @@ mod tests {
                 vignette: 100.0,
                 ..settings()
             },
-            None,
         );
         let corner = out.get_pixel16(0, 0);
         let centre = out.get_pixel16(8, 8);
@@ -4330,7 +4397,7 @@ mod tests {
                 scene.set_rgb(x, y, [v, v * 0.72, v * 0.48]);
             }
         }
-        let plain = apply_scene_to_tilemap(&scene, &settings(), None);
+        let plain = apply_scene_to_tilemap(&scene, &settings());
         let sharp = apply_scene_to_tilemap(
             &scene,
             &DevelopSettings {
@@ -4338,7 +4405,6 @@ mod tests {
                 sharpen_detail: 100.0,
                 ..settings()
             },
-            None,
         );
         let spread = |tm: &TileMap| {
             let a = tm.get_pixel16(10, 10).0 as i32;
@@ -4377,8 +4443,8 @@ mod tests {
                 ..Default::default()
             },
         });
-        let plain = apply_scene_to_tilemap(&scene, &settings(), None);
-        let masked = apply_scene_to_tilemap(&scene, &local, None);
+        let plain = apply_scene_to_tilemap(&scene, &settings());
+        let masked = apply_scene_to_tilemap(&scene, &local);
         let p_center = plain.get_pixel16(10, 10);
         let m_center = masked.get_pixel16(10, 10);
         let p_corner = plain.get_pixel16(0, 0);
@@ -4453,7 +4519,7 @@ mod tests {
             h as u32,
             1,
         );
-        let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten16();
+        let committed = apply_scene_to_tilemap(&scene, &settings).flatten16();
         let mut errors = Vec::with_capacity(preview.len() * 3);
         for (i, p) in preview.iter().enumerate() {
             for channel in 0..3 {

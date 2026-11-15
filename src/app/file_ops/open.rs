@@ -40,6 +40,85 @@ const RAW_SPILL_FREE_RESERVE: u64 = 10 << 30;
 /// Filmstrip neighbours prefetched in the background, in order of preference.
 const RAW_PREFETCH_OFFSETS: [isize; 3] = [1, -1, 2];
 
+/// Threads reading embedded previews for the filmstrip at once.
+const RAW_PREVIEW_WORKERS: usize = 3;
+
+/// An embedded preview at the size the session shows it.
+fn shrink_raw_preview(
+    mut preview: crate::formats::raw_preview::RawPreview,
+) -> crate::formats::raw_preview::RawPreview {
+    let longest = preview.width.max(preview.height).max(1);
+    let scale = (RAW_SESSION_PREVIEW_MAX_DIM as f32 / longest as f32).min(1.0);
+    let width = ((preview.width as f32 * scale).round() as u32).max(1);
+    let height = ((preview.height as f32 * scale).round() as u32).max(1);
+    if (width, height) != (preview.width, preview.height) {
+        preview.rgba = crate::core::canvas::downscale_rgba(
+            &preview.rgba,
+            preview.width,
+            preview.height,
+            width,
+            height,
+        );
+        preview.width = width;
+        preview.height = height;
+    }
+    preview
+}
+
+/// Read the embedded previews of `paths` on a few worker threads, each
+/// shrunk to session size there, and hand them over in the order of `paths`
+/// (the filmstrip's order). The channel holds two: a fast reader cannot queue
+/// every preview ahead of the UI thread. Dropping the receiver stops the work.
+fn spawn_raw_previews(
+    paths: Vec<PathBuf>,
+) -> std::sync::mpsc::Receiver<(PathBuf, crate::formats::raw_preview::RawPreview)> {
+    use std::sync::atomic::AtomicUsize;
+    let (out_tx, out_rx) = std::sync::mpsc::sync_channel(2);
+    let workers = RAW_PREVIEW_WORKERS.min(paths.len()).max(1);
+    let paths = Arc::new(paths);
+    let next = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::sync_channel(workers);
+    for _ in 0..workers {
+        let (paths, next, stop, tx) = (
+            Arc::clone(&paths),
+            Arc::clone(&next),
+            Arc::clone(&stop),
+            tx.clone(),
+        );
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(path) = paths.get(index) else {
+                    break;
+                };
+                let preview = crate::formats::raw_preview::extract(path).map(shrink_raw_preview);
+                if tx.send((index, preview)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(tx);
+    std::thread::spawn(move || {
+        let mut waiting = std::collections::BTreeMap::new();
+        let mut due = 0usize;
+        for (index, preview) in rx {
+            waiting.insert(index, preview);
+            while let Some(preview) = waiting.remove(&due) {
+                if let Some(preview) = preview
+                    && out_tx.send((paths[due].clone(), preview)).is_err()
+                {
+                    stop.store(true, Ordering::Relaxed);
+                    return;
+                }
+                due += 1;
+            }
+        }
+    });
+    out_rx
+}
+
 /// Logical CPUs for a RAW decode the user is waiting on. The Develop panel is
 /// locked meanwhile, so only the UI thread and the GPU driver need headroom.
 fn foreground_raw_thread_count(logical_threads: usize) -> usize {
@@ -278,6 +357,70 @@ mod raw_transition_tests {
         assert!(app.dev.develop_switch_pending.is_none());
     }
 
+    /// «Open 2 Images»: the active image and a marked one (parked on disk,
+    /// so the queue reads it back first) open with their own settings, no undo
+    /// step and, when asked, at 8 bits; the unmarked third image is closed.
+    #[test]
+    fn marked_filmstrip_images_open_together_without_an_undo_step() {
+        let (mut app, a, b) = raw_session();
+        let c = DocumentId(app.docs.next_doc_id);
+        app.docs.next_doc_id += 1;
+        app.docs.documents.push(Document::from_canvas(
+            c,
+            raw_like_canvas(96, 64, 7),
+            Some(std::env::temp_dir().join("iai-no-such-dir-c").join("c.nef")),
+        ));
+        app.develop_session_push(c, true);
+        let mut brighter = crate::core::develop::DevelopSettings::default();
+        brighter.exposure = 0.5;
+        app.dev
+            .develop_session
+            .iter_mut()
+            .find(|e| e.doc == b)
+            .unwrap()
+            .settings = brighter;
+        let b_before = app.docs.documents[doc_idx(&app, b)]
+            .canvas
+            .layer_stack
+            .layers[0]
+            .tiles
+            .flatten16();
+        app.evict_raw_document(doc_idx(&app, b));
+        assert!(app.docs.documents[doc_idx(&app, b)].deferred_raw);
+
+        app.dev.develop_marked = vec![b];
+        app.start_develop_open(a, true);
+        assert!(
+            app.docs.index_of(c).is_none(),
+            "the unmarked image is closed"
+        );
+        // The parked image comes back from disk, then bakes.
+        land_raw_job(&mut app);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.dev.develop_bake_all.is_some() {
+            assert!(std::time::Instant::now() < deadline, "the open finished");
+            app.poll_develop_bake_all();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        for id in [a, b] {
+            let canvas = &app.docs.documents[doc_idx(&app, id)].canvas;
+            assert!(canvas.develop_source.is_none(), "baked");
+            assert!(!canvas.can_undo(), "no undo step back to a look never had");
+            assert_eq!(canvas.bit_depth, crate::core::canvas::BitDepth::Eight);
+            assert!(!canvas.layer_stack.layers[0].tiles.has_hdr());
+        }
+        let b_after = app.docs.documents[doc_idx(&app, b)]
+            .canvas
+            .layer_stack
+            .layers[0]
+            .tiles
+            .flatten();
+        let b_before8: Vec<u8> = b_before.iter().map(|v| (v >> 8) as u8).collect();
+        assert_ne!(b_after, b_before8, "b got its own settings");
+        assert!(app.dev.develop_session.is_empty() && app.dev.develop_marked.is_empty());
+    }
+
     #[test]
     fn a_cancelled_raw_decode_leaves_the_image_parked_not_failed() {
         let (mut app, _a, b) = raw_session();
@@ -438,6 +581,16 @@ impl App {
             .is_some_and(|path| self.jobs.loading_keys.contains(&normalized_path_key(path)))
     }
 
+    /// A RAW still decoding whose colour-true draft carries its own scene
+    /// master: Develop edits the draft until the full decode replaces it.
+    pub(in crate::app) fn raw_draft_editable(&self, id: crate::core::document::DocumentId) -> bool {
+        !self.jobs.raw_preview_failures.contains_key(&id)
+            && self
+                .docs
+                .by_id(id)
+                .is_some_and(|doc| doc.raw_draft && doc.canvas.develop_source.is_some())
+    }
+
     pub(in crate::app) fn disk_is_newer_than_document(&self, idx: usize, path: &Path) -> bool {
         // The newer file is the one this document is being written into.
         if self.save_under_way(idx) {
@@ -580,20 +733,13 @@ impl App {
             // demosaicing every selected file. They are display-only deferred
             // placeholders; selecting one calls ensure_raw_resident.
             if !raw_paths.is_empty() {
-                let preview_paths = raw_paths.clone();
-                // Bound decoded preview buffers so a fast extractor cannot
-                // queue 20 full embedded JPEG rasters ahead of the UI thread.
-                let (preview_tx, preview_rx) = std::sync::mpsc::sync_channel(2);
-                std::thread::spawn(move || {
-                    for path in preview_paths {
-                        if let Some(preview) = crate::formats::raw_preview::extract(&path)
-                            && preview_tx.send((path, preview)).is_err()
-                        {
-                            break;
-                        }
-                    }
-                });
-                self.jobs.pending_raw_previews.push(preview_rx);
+                // The first image is decoded below at once: its decode takes
+                // the camera-JPEG stats from the preview worker rather than
+                // decoding that JPEG a second time.
+                crate::formats::raw_preview::expect_stats(&raw_paths[0]);
+                self.jobs
+                    .pending_raw_previews
+                    .push(spawn_raw_previews(raw_paths.clone()));
             }
 
             // Full-decode ordinary raster files as before. Of the RAWs only the
@@ -662,9 +808,19 @@ impl App {
                 match rx.try_recv() {
                     Ok((path, Ok(canvases), is_last)) => {
                         self.jobs.loading_keys.remove(&normalized_path_key(&path));
-                        self.jobs
+                        if let Some(job) = self
+                            .jobs
                             .raw_decode_jobs
-                            .remove(&normalized_path_key(&path));
+                            .remove(&normalized_path_key(&path))
+                        {
+                            crate::diag::note(
+                                "perf",
+                                &format!(
+                                    "raw full image ready {} ms after it was asked for",
+                                    job.started.elapsed().as_millis()
+                                ),
+                            );
+                        }
                         // Record the successful open in the recent-files catalog
                         // (Track B) and prime its thumbnail.
                         let dims = canvases.first().map(|c| (c.width, c.height));
@@ -1126,22 +1282,9 @@ impl App {
             }
             return;
         }
-        let longest = preview.width.max(preview.height).max(1);
-        let scale = (RAW_SESSION_PREVIEW_MAX_DIM as f32 / longest as f32).min(1.0);
-        let width = ((preview.width as f32 * scale).round() as u32).max(1);
-        let height = ((preview.height as f32 * scale).round() as u32).max(1);
-        let rgba = if (width, height) == (preview.width, preview.height) {
-            preview.rgba
-        } else {
-            crate::core::canvas::downscale_rgba(
-                &preview.rgba,
-                preview.width,
-                preview.height,
-                width,
-                height,
-            )
-        };
-        let canvas = Canvas::from_rgba(rgba, width, height);
+        // Already session-sized when it comes from the preview workers.
+        let preview = shrink_raw_preview(preview);
+        let canvas = Canvas::from_rgba(preview.rgba, preview.width, preview.height);
         self.attach_raw_placeholder(event_loop, path, canvas, preview.exif, false);
     }
 
@@ -1258,6 +1401,15 @@ impl App {
         {
             return;
         }
+        if let Some(job) = self.jobs.raw_decode_jobs.get(&key) {
+            crate::diag::note(
+                "perf",
+                &format!(
+                    "raw draft on screen {} ms after it was asked for",
+                    job.started.elapsed().as_millis()
+                ),
+            );
+        }
         let existing = self
             .jobs
             .raw_preview_docs
@@ -1333,20 +1485,28 @@ impl App {
                 .develop_bake_all
                 .as_ref()
                 .is_some_and(|state| state.pending.iter().any(|(doc, _)| *doc == id));
-        let settings = self
-            .dev
-            .develop_session
-            .iter()
-            .find(|entry| entry.doc == id)
-            .map(|entry| entry.settings.clone())
-            .unwrap_or_default();
-        if active
+        let previewing = active
             && self
                 .dev
                 .develop_preview
                 .as_ref()
-                .is_some_and(|preview| preview.doc_id == id)
-        {
+                .is_some_and(|preview| preview.doc_id == id);
+        // Sliders moved on the draft carry over: the session entry is only
+        // written when the filmstrip switches image.
+        let settings = if previewing {
+            self.shell.ui.develop_settings.clone()
+        } else {
+            self.dev
+                .develop_session
+                .iter()
+                .find(|entry| entry.doc == id)
+                .map(|entry| entry.settings.clone())
+                .unwrap_or_default()
+        };
+        if let Some(entry) = self.dev.develop_session.iter_mut().find(|e| e.doc == id) {
+            entry.settings = settings.clone();
+        }
+        if previewing {
             self.cancel_develop_preview();
         }
         // Force a re-fit for the full-resolution canvas (the preview was lower-res).
@@ -1791,7 +1951,9 @@ impl App {
         if self.jobs.loading_keys.contains(&key) {
             return;
         }
-        let thumb = self.docs.documents[idx].canvas.downscaled_thumbnail(2048);
+        // On the UI thread, at the moment the image the user switched to
+        // appears: sampled, not flattened.
+        let thumb = self.docs.documents[idx].canvas.sampled_thumbnail(2048);
         let full = std::mem::replace(&mut self.docs.documents[idx].canvas, thumb);
         self.docs.documents[idx].deferred_raw = true;
         self.docs.documents[idx].raw_draft = false;

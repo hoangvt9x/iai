@@ -3678,6 +3678,28 @@ impl LayerStack {
         }
     }
 
+    /// A copy of the stack in which layer `layer_id` sits, masked by `mask`,
+    /// over an unmasked copy of itself under a spare id. The Develop preview
+    /// with a selection composites this: the shader develops `layer_id` only,
+    /// so the edit shows where the mask is and the untouched layer elsewhere,
+    /// as the committed bake keeps the edit to the selection.
+    pub fn with_masked_copy_over(&self, layer_id: u32, mask: &LayerMask) -> Option<LayerStack> {
+        let idx = self.layers.iter().position(|l| l.id == layer_id)?;
+        let spare_id = self.layers.iter().map(|l| l.id).max()?.checked_add(1)?;
+        let mut out = self.clone();
+        let mut under = out.layers[idx].clone();
+        under.id = spare_id;
+        let over = &mut out.layers[idx];
+        over.mask = Some(mask.clone());
+        over.is_background = false;
+        out.layers.insert(idx, under);
+        if out.active_idx >= idx {
+            out.active_idx += 1;
+        }
+        out.next_id = out.next_id.max(spare_id.saturating_add(1));
+        Some(out)
+    }
+
     /// Build a render-only stack with `overlay` directly above the Background
     /// and below editable foreground layers. Used by document-level PDF edits:
     /// a shared clear behaves like erasing the imported page, while text/images

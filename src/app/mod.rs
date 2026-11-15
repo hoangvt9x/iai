@@ -56,6 +56,7 @@ pub mod powerclip_ops;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
 pub mod quick_tasks;
+mod raw_memory;
 pub mod render;
 pub mod scan_cleanup_ops;
 mod selection_feedback;

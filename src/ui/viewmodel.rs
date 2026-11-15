@@ -428,6 +428,9 @@ pub struct DevelopViewModel {
     /// True while the Develop panel is acting as the RAW Develop stage (slice
     /// R2): the panel is titled "Develop" and commit/cancel mean open/discard.
     pub develop_mode: bool,
+    /// Images «Open Image» opens: the active one plus those marked in the
+    /// filmstrip.
+    pub develop_open_count: usize,
     /// Open/closed state of the panel sections, in panel order (persisted).
     pub develop_sections_open: [bool; develop::DEV_PANEL_SECTIONS],
     /// EXIF line for the active RAW ("ISO … · f/… · …"); hidden when None.
@@ -1574,6 +1577,7 @@ impl Default for UiData {
                 develop_scopes_revision: 0,
                 develop_scope_visibility: develop::DEFAULT_SCOPE_VISIBILITY,
                 develop_mode: false,
+                develop_open_count: 1,
                 develop_sections_open: develop::DEFAULT_SECTIONS_OPEN,
                 develop_exif: None,
                 develop_readout: None,

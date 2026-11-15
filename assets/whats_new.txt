@@ -2,6 +2,17 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+15/11/2026
+- Mở ảnh RAW rồi chỉnh màu, bấm «Open Image»: ảnh vào canvas nhanh hơn rõ (trước đây app tính ảnh hai lần).
+- Bấm «Open Image» khi ảnh RAW chưa giải mã xong: app tự chờ rồi mở, không phải bấm lại.
+- Mở nhiều ảnh RAW một lượt: dải ảnh nhỏ phía dưới hiện đủ nhanh hơn, chuyển qua lại giữa các ảnh bớt khựng.
+- Mở ảnh RAW: chưa tới một giây đã kéo được các thanh chỉnh trên ảnh xem nhanh, không phải chờ ảnh đủ nét; ảnh đủ nét về thì giữ nguyên những gì đã chỉnh. Ảnh đủ nét cũng về nhanh hơn khoảng một phần năm.
+- Develop khi đang có vùng chọn: các thanh sáng tối, cân bằng trắng, Curve chỉ đổi trong vùng chọn, ngoài vùng chọn giữ nguyên.
+- Mở nhiều ảnh RAW vào canvas một lượt: ở dải ảnh nhỏ phía dưới, giữ Ctrl rồi bấm từng ảnh (hoặc Shift để chọn một dãy, hay bấm «Chọn hết»), nút đổi thành «Open N Images»; mỗi ảnh mở ra với đúng phần chỉnh của nó.
+- Mở lại một ảnh RAW đã mở trước đó: nhanh gấp 4–5 lần (dưới một giây), vì app cất sẵn ảnh đã giải mã (tối đa 3 GB, tự dọn ảnh cũ).
+- App nhớ phần chỉnh màu của từng file RAW: lần sau mở lại file đó, các thanh chỉnh ở đúng chỗ lần trước bấm Open.
+- Ảnh RAW mở vào canvas tốn RAM bằng một nửa trước. Muốn nhẹ hơn nữa (khi mở nhiều ảnh), bỏ dấu ô «16-bit» cạnh nút 100% trong cửa sổ Develop: ảnh mở ra 8-bit, tốn RAM bằng một phần ba.
+
 14/11/2026
 - Mở ảnh RAW: mép giữa vùng da sáng và vùng tối (viền mặt, kẽ tay, sợi tóc nằm trên da) không còn hàng chấm đỏ sẫm và dải nâu đỏ loang sang phía tối; mép sạch và gọn như Photoshop. Ảnh RAW đã mở và lưu thành .iai từ trước thì giữ như cũ, muốn có mép sạch hãy mở lại file RAW gốc.
 - Công cụ Smudge (ngón tay): vệt kéo nay mượt và mờ dần đều như Photoshop, không còn hiện từng bậc như bậc thang, kể cả khi dùng cọ to hay kéo chéo. Lực 100% mang nguyên mảng màu ở chỗ bấm chuột đi tới hết nét kéo. Cỡ cọ Smudge tối đa 2500 px.

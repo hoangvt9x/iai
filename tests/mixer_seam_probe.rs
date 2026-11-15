@@ -153,7 +153,7 @@ fn mixer_seam_probe() {
     // The neutral render is the baseline the edit is measured against.
     let neutral16 = render_default_look(&scene);
     let neutral: Vec<u8> = neutral16.iter().map(|v| (v >> 8) as u8).collect();
-    let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+    let committed = apply_scene_to_tilemap(&scene, &settings).flatten();
     save(&out_dir.join("base.png"), &neutral, w, h);
     save(&out_dir.join("commit.png"), &committed, w, h);
     let commit_ratio = seam_report("commit", &neutral, &committed, w as usize, h as usize);

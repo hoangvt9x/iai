@@ -364,6 +364,29 @@ impl Canvas {
         true
     }
 
+    /// Replace a layer's tiles with no undo step: for pixels the document is
+    /// born with (a RAW opened through Develop), where "before" is nothing the
+    /// user ever had and keeping it would double the image's memory.
+    pub fn replace_layer_tiles_untracked(
+        &mut self,
+        layer_id: u32,
+        tiles: iai_raster::tile::TileMap,
+    ) -> bool {
+        let Some(layer) = self
+            .layer_stack
+            .layers
+            .iter_mut()
+            .find(|l| l.id == layer_id)
+        else {
+            return false;
+        };
+        layer.tiles = tiles;
+        self.layer_revision += 1;
+        self.dirty.expand_full(self.width, self.height);
+        self.flatten_full();
+        true
+    }
+
     pub fn commit_layer_tiles_change(
         &mut self,
         layer_id: u32,

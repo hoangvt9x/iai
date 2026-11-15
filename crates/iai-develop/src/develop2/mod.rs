@@ -421,13 +421,12 @@ fn graph_signature(settings: &DevelopSettings, nodes: &[NodeSpec]) -> u64 {
 pub fn execute_scene(
     scene: &SceneSource,
     settings: &DevelopSettings,
-    selection: Option<crate::develop::DevelopSelection>,
 ) -> Result<TileMap, GraphError> {
     let graph = compile_for_scene(settings, scene)?;
     describe_input_boundary(scene).validate()?;
     debug_assert!(graph.nodes.iter().any(|n| n.kind == NodeKind::SrgbEncode));
     Ok(crate::develop_scene::apply_scene1_to_tilemap(
-        scene, settings, selection,
+        scene, settings,
     ))
 }
 

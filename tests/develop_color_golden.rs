@@ -68,12 +68,12 @@ fn every_engine_version_roundtrips_without_renderer_drift() {
             curve_lights: 7.0,
             ..Default::default()
         };
-        let before = apply_scene_to_tilemap(&scene, &settings, None).flatten16();
+        let before = apply_scene_to_tilemap(&scene, &settings).flatten16();
         let json = serde_json::to_vec(&settings).expect("serialize Develop settings");
         let reopened: DevelopSettings =
             serde_json::from_slice(&json).expect("reopen Develop settings");
         assert_eq!(reopened.develop_engine_version, engine);
-        let after = apply_scene_to_tilemap(&scene, &reopened, None).flatten16();
+        let after = apply_scene_to_tilemap(&scene, &reopened).flatten16();
         assert_eq!(after, before, "renderer drift after {engine:?} reopen");
     }
 }
@@ -131,7 +131,7 @@ fn develop3_locked_recipe_bitmap_golden_is_stable() {
         mixer_luminance: [4.0, -3.0, 5.0, 0.0, -2.0, 3.0, -4.0, 2.0],
         ..Default::default()
     };
-    let pixels = apply_scene_to_tilemap(&scene, &settings, None).flatten16();
+    let pixels = apply_scene_to_tilemap(&scene, &settings).flatten16();
     let mut channel_sums = [0u64; 3];
     let mut channel_square_sums = [0u128; 3];
     let mut channel_edge_energy = [0u64; 3];
@@ -220,8 +220,8 @@ fn pre_versioned_snapshot_reopens_as_scene1_bit_exact() {
         }
     }
     assert_eq!(
-        apply_scene_to_tilemap(&scene, &reopened, None).flatten16(),
-        apply_scene_to_tilemap(&scene, &explicit, None).flatten16(),
+        apply_scene_to_tilemap(&scene, &reopened).flatten16(),
+        apply_scene_to_tilemap(&scene, &explicit).flatten16(),
         "pre-versioned settings must retain the Scene1 renderer"
     );
 }

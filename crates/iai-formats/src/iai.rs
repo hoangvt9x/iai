@@ -2902,7 +2902,7 @@ mod tests {
 
         // This is the exact settled/commit path used after the interactive
         // preview refines. It remains the reference through save and export.
-        let settled = apply_scene_to_tilemap(&scene, &settings, None);
+        let settled = apply_scene_to_tilemap(&scene, &settings);
         let expected = settled.flatten16();
         let mut canvas = solid([0, 0, 0, 255], w, h);
         canvas.bit_depth = BitDepth::Sixteen;

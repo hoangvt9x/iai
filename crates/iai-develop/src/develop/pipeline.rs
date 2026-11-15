@@ -50,6 +50,89 @@ pub struct DevelopSelection {
     pub layer_offset: (i32, i32),
 }
 
+/// Keep a whole-layer Develop result only inside the selection: outside it the
+/// layer stays `original`; along a soft edge the two mix by the selection's
+/// coverage, with the same arithmetic as the per-pixel engine's 16-bit path.
+/// The scene chain renders the whole layer at once, so this is how its result
+/// respects a selection.
+pub fn keep_within_selection(
+    edited: TileMap,
+    original: &TileMap,
+    selection: &DevelopSelection,
+) -> TileMap {
+    use iai_raster::tile::{Tile, next_tile_revision};
+    let size = TILE_SIZE as usize;
+    let as16 = |tile: Option<&Arc<Tile>>| -> Vec<u16> {
+        match tile {
+            Some(t) => match &t.pixels16 {
+                Some(p) => p.clone(),
+                None => t.pixels.iter().map(|&v| v as u16 * 257).collect(),
+            },
+            None => vec![0u16; TILE_PIXELS * 4],
+        }
+    };
+    let tiles: HashMap<_, _> = edited
+        .tiles
+        .par_iter()
+        .map(|(pos, tile)| {
+            let x0 = selection.layer_offset.0 + pos.x * TILE_SIZE as i32;
+            let y0 = selection.layer_offset.1 + pos.y * TILE_SIZE as i32;
+            let cover = |i: usize| -> f32 {
+                let cx = x0 + (i % size) as i32;
+                let cy = y0 + (i / size) as i32;
+                if cx >= 0 && cy >= 0 {
+                    selection.selection.sample(cx as u32, cy as u32)
+                } else {
+                    0.0
+                }
+            };
+            let before = original.tiles.get(pos);
+            let mut px = as16(Some(tile));
+            let base = as16(before);
+            let (mut changed, mut kept) = (false, 0usize);
+            for (i, (p, o)) in px.chunks_exact_mut(4).zip(base.chunks_exact(4)).enumerate() {
+                let a = cover(i);
+                if a >= 0.999 {
+                    changed = true;
+                    kept += 1;
+                } else if a <= 0.001 {
+                    p.copy_from_slice(o);
+                } else {
+                    changed = true;
+                    let inv = 1.0 - a;
+                    for c in 0..3 {
+                        p[c] = (p[c] as f32 * a + o[c] as f32 * inv).round() as u16;
+                    }
+                    p[3] = o[3];
+                }
+            }
+            if kept == TILE_PIXELS {
+                return (*pos, Arc::clone(tile));
+            }
+            if !changed && let Some(before) = before {
+                return (*pos, Arc::clone(before));
+            }
+            let mut out = if tile.pixels16.is_some() {
+                Tile::from_rgba16(px)
+            } else {
+                Tile {
+                    pixels: px.iter().map(|&v| (v >> 8) as u8).collect(),
+                    pixels16: None,
+                    ink: None,
+                    revision: 0,
+                }
+            };
+            out.revision = next_tile_revision();
+            (*pos, Arc::new(out))
+        })
+        .collect();
+    TileMap {
+        tiles,
+        width: edited.width,
+        height: edited.height,
+    }
+}
+
 pub fn apply_to_tilemap_direct(
     source_tiles: &TileMap,
     settings: &DevelopSettings,

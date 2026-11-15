@@ -1136,6 +1136,14 @@ pub struct DevelopBakeAll {
     pub developed: usize,
     /// Single-image RAW session (drives the "Opened/Developed RAW" wording).
     pub single_raw: bool,
+    /// The settled preview's tiles were landed as the bake (no second render).
+    pub reused_preview: bool,
+    /// RAW images born by this Open (transient session entries): their
+    /// pixels land with no undo step, which would only lead back to a look
+    /// the user never had while doubling the image's memory.
+    pub fresh: Vec<DocumentId>,
+    /// Open the fresh RAW images at 8 bits/channel (lighter in RAM).
+    pub eight_bit: bool,
     pub rx: Option<std::sync::mpsc::Receiver<DevelopBakeAllResult>>,
 }
 
@@ -1455,6 +1463,8 @@ impl App {
                 develop_pan_drag: None,
                 develop_tool: crate::app::develop_shell::DevelopTool::default(),
                 develop_composited_view: None,
+                develop_selection_mask: None,
+                develop_marked: Vec::new(),
                 develop_composited_taps: 0,
                 develop_view_moved_at: None,
                 develop_detail_view: None,
@@ -1471,6 +1481,8 @@ impl App {
                 develop_session: Vec::new(),
                 develop_bake_all: None,
                 develop_commit_after_refine: false,
+                develop_commit_when_decoded: false,
+                develop_commit_asked_at: None,
                 develop_thumbs: std::collections::HashMap::new(),
                 develop_switch_pending: None,
                 pending_develop: Vec::new(),

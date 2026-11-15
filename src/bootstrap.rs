@@ -42,10 +42,29 @@ fn init_thread_pool() {
     crate::diag::note("hw", &summary);
 }
 
+/// Decoded RAW images are kept on disk for the next open of the same file
+/// (`%LOCALAPPDATA%\IAI\raw_cache`, 3 GB at most, never below 20 GB free).
+fn configure_raw_cache() {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("APPDATA"))
+        .map(std::path::PathBuf::from);
+    let Some(base) = base else {
+        return;
+    };
+    let build = crate::update::this_build();
+    iai_formats::raw_cache::configure(Some(iai_formats::raw_cache::RawCacheConfig {
+        dir: base.join("IAI").join("raw_cache"),
+        budget: 3 << 30,
+        free_reserve: 20 << 30,
+        revision: format!("{}-{}", build.commit, build.time),
+    }));
+}
+
 /// Run IAI to completion. Blocks until the event loop exits.
 pub fn run() -> Result<(), BootstrapError> {
     crate::core::hw::opt_out_of_power_throttling();
     init_thread_pool();
+    configure_raw_cache();
 
     #[cfg(windows)]
     crate::windows_integration::register_iai_file_type();

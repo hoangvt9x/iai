@@ -32,7 +32,7 @@ fn benchmark_synthetic_12_24_45_mp_commit() {
             }
         }
         let started = Instant::now();
-        let output = apply_scene_to_tilemap(&scene, &settings, None);
+        let output = apply_scene_to_tilemap(&scene, &settings);
         eprintln!(
             "{label},{width}x{height},commit_ms={:.3},output_tiles={}",
             started.elapsed().as_secs_f64() * 1000.0,

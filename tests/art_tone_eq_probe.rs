@@ -235,7 +235,7 @@ fn measure_iai(raw: &Path) {
         develop_engine_version: DevelopEngineVersion::Develop3,
         ..Default::default()
     };
-    let iai_neutral_full = apply_scene_to_tilemap(scene, &base_iai, None).flatten16();
+    let iai_neutral_full = apply_scene_to_tilemap(scene, &base_iai).flatten16();
     let iai_neutral = box_resample_width(&iai_neutral_full, scene.width, scene.height, WIDTH).0;
     let setters: [(&str, fn(&mut DevelopSettings)); 5] = [
         ("Blacks", |s| s.blacks = 100.0),
@@ -249,7 +249,7 @@ fn measure_iai(raw: &Path) {
     for (name, set) in setters {
         let mut s = base_iai.clone();
         set(&mut s);
-        let pushed_full = apply_scene_to_tilemap(scene, &s, None).flatten16();
+        let pushed_full = apply_scene_to_tilemap(scene, &s).flatten16();
         let pushed = box_resample_width(&pushed_full, scene.width, scene.height, WIDTH).0;
         let (curve, peak, lo, hi) = influence_curve(&iai_neutral, &pushed);
         println!(

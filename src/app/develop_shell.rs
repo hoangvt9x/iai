@@ -45,6 +45,22 @@ pub struct DevelopShell {
     /// carry the view transform, so the Develop window must recomposite when its
     /// own zoom/pan/size diverges from this. `None` = nothing baked for it yet.
     pub(in crate::app) develop_composited_view: Option<[u32; 5]>,
+    /// The selection as a layer mask of the Develop layer, for the GPU preview
+    /// with a selection (see `App::develop_selection_mask`), with what it was
+    /// built from: document, layer id, layer offset + size, selection offset +
+    /// size + mask revision.
+    pub(in crate::app) develop_selection_mask: Option<(
+        (
+            u32,
+            u32,
+            (i32, i32),
+            (u32, u32),
+            (i32, i32),
+            (u32, u32),
+            u64,
+        ),
+        crate::core::layer::LayerMask,
+    )>,
     /// Display-grid taps per axis the last composite gave the Develop layer
     /// (see `App::develop_grid_taps`); a change recomposites the view.
     pub(in crate::app) develop_composited_taps: u32,
@@ -91,12 +107,20 @@ pub struct DevelopShell {
     /// `pending_develop` defers entering Develop to
     /// just after the load is attached (see `enter_pending_develop`).
     pub(in crate::app) develop_session: Vec<DevelopSessionEntry>,
+    /// Filmstrip images marked (Ctrl / Shift click) to open together with the
+    /// active one on «Open Image», each with its own settings.
+    pub(in crate::app) develop_marked: Vec<DocumentId>,
     /// In-progress "Open Image" bake over the session (see [`DevelopBakeAll`]).
     pub(in crate::app) develop_bake_all: Option<DevelopBakeAll>,
     /// Open Image was requested while the interactive GPU frame was still
     /// active. Wait for the exact CPU settled frame before starting the commit
     /// queue so teardown can never expose a different set of pixels.
     pub(in crate::app) develop_commit_after_refine: bool,
+    /// Open Image was pressed while the selected RAW was still decoding: the
+    /// commit runs by itself as soon as the full image lands.
+    pub(in crate::app) develop_commit_when_decoded: bool,
+    /// When Open Image was pressed, for the `perf` line of the commit.
+    pub(in crate::app) develop_commit_asked_at: Option<std::time::Instant>,
     /// Filmstrip thumbnails for this Develop session (textures on the Develop
     /// window's egui context; dropped on teardown).
     pub(in crate::app) develop_thumbs: std::collections::HashMap<DocumentId, egui::TextureHandle>,

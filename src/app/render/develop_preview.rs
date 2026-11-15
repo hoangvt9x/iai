@@ -145,6 +145,97 @@ impl App {
         if dragging { 1 } else { 3 }
     }
 
+    /// Whether the GPU can preview Develop on `layer_id` under the current
+    /// selection: always without one; with one, when the layer has no mask of
+    /// its own and nothing clips to it, so the selection can stand in as its
+    /// mask (see `develop_selection_stack`). Otherwise the preview bakes on
+    /// the CPU.
+    pub(in crate::app) fn develop_gpu_selection_ok(&self, layer_id: u32) -> bool {
+        let canvas = &self.docs.active().canvas;
+        if !canvas.selection.active {
+            return true;
+        }
+        let layers = &canvas.layer_stack.layers;
+        layers
+            .iter()
+            .find(|l| l.id == layer_id)
+            .is_some_and(|l| l.mask.as_ref().is_none_or(|m| !m.enabled))
+            && !layers.iter().any(|l| l.clip_parent_id == Some(layer_id))
+    }
+
+    /// The selection as a mask of the Develop layer (in its own pixels), for
+    /// the GPU preview with a selection. Built when the selection or the layer
+    /// changes, then reused frame after frame. `None` without a selection.
+    pub(in crate::app) fn develop_selection_mask(
+        &mut self,
+        layer_id: u32,
+    ) -> Option<crate::core::layer::LayerMask> {
+        let doc = self.docs.active();
+        let sel = &doc.canvas.selection;
+        if !sel.active {
+            self.dev.develop_selection_mask = None;
+            return None;
+        }
+        let layer = doc
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == layer_id)?;
+        let key = (
+            doc.id.0,
+            layer_id,
+            layer.offset,
+            (layer.width, layer.height),
+            sel.offset,
+            (sel.width, sel.height),
+            sel.mask_revision,
+        );
+        if let Some((built, mask)) = &self.dev.develop_selection_mask
+            && *built == key
+        {
+            return Some(mask.clone());
+        }
+        let (lw, lh) = (layer.width as usize, layer.height as usize);
+        let (ox, oy) = layer.offset;
+        let mut rgba = vec![0u8; lw * lh * 4];
+        {
+            use rayon::prelude::*;
+            rgba.par_chunks_mut(lw * 4)
+                .enumerate()
+                .for_each(|(ly, row)| {
+                    let cy = ly as i64 + oy as i64 - sel.offset.1 as i64;
+                    for (lx, px) in row.chunks_exact_mut(4).enumerate() {
+                        let cx = lx as i64 + ox as i64 - sel.offset.0 as i64;
+                        let m = if cx >= 0
+                            && cy >= 0
+                            && cx < sel.width as i64
+                            && cy < sel.height as i64
+                        {
+                            sel.mask
+                                .get(cy as usize * sel.width as usize + cx as usize)
+                                .copied()
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        px.copy_from_slice(&[m, m, m, 255]);
+                    }
+                });
+        }
+        let mask = crate::core::layer::LayerMask {
+            tiles: crate::core::tile::TileMap::from_rgba(&rgba, layer.width, layer.height),
+            width: layer.width,
+            height: layer.height,
+            enabled: true,
+            inverted: false,
+            bake_offset: (0, 0),
+            bake_frame_offset: (0, 0),
+        };
+        self.dev.develop_selection_mask = Some((key, mask.clone()));
+        Some(mask)
+    }
+
     /// The Develop preview runs on a scene master the GPU can host with a
     /// hardware adapter — the shader then carries Effects, Detail and Locals.
     pub(in crate::app) fn develop_gpu_scene_ok(&self) -> bool {
@@ -321,7 +412,7 @@ impl App {
         let active = gpu_active
             && doc_matches
             && self.shell.ui.show_develop_dialog
-            && !self.docs.active().canvas.selection.active
+            && self.develop_gpu_selection_ok(layer_id)
             && !self.shell.ui.develop_settings.is_neutral();
         if !active {
             self.dev.develop_proxy_cache = None;

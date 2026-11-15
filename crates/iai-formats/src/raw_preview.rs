@@ -39,6 +39,55 @@ fn preview_luma_cache()
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Files whose embedded preview is being measured right now (or is about to
+/// be: see [`expect_stats`]), so a decode of the same file waits for those
+/// stats instead of decoding the camera JPEG a second time.
+fn stats_under_way() -> &'static (
+    Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    std::sync::Condvar,
+) {
+    static UNDER_WAY: OnceLock<(
+        Mutex<std::collections::HashSet<std::path::PathBuf>>,
+        std::sync::Condvar,
+    )> = OnceLock::new();
+    UNDER_WAY.get_or_init(Default::default)
+}
+
+/// Announce that [`extract`] is about to run for `path` on another thread.
+pub fn expect_stats(path: &Path) {
+    if let Ok(mut under_way) = stats_under_way().0.lock() {
+        under_way.insert(path.to_path_buf());
+    }
+}
+
+/// Ends the announcement for a path, whatever became of its extract.
+struct StatsUnderWay<'a>(&'a Path);
+
+impl Drop for StatsUnderWay<'_> {
+    fn drop(&mut self) {
+        let (under_way, done) = stats_under_way();
+        if let Ok(mut under_way) = under_way.lock() {
+            under_way.remove(self.0);
+        }
+        done.notify_all();
+    }
+}
+
+/// The stats of `path` once the extract under way for it (if any) has
+/// measured them, waiting at most `patience`. `None` when nothing is
+/// measuring the file, or it has no usable preview.
+pub fn stats_when_measured(path: &Path, patience: std::time::Duration) -> Option<RawPreviewStats> {
+    let (under_way, done) = stats_under_way();
+    let deadline = std::time::Instant::now() + patience;
+    let mut guard = under_way.lock().ok()?;
+    while guard.contains(path) {
+        let left = deadline.checked_duration_since(std::time::Instant::now())?;
+        guard = done.wait_timeout(guard, left).ok()?.0;
+    }
+    drop(guard);
+    cached_stats(path)
+}
+
 /// A decoded, upright RGBA8 preview from a RAW's embedded JPEG.
 pub struct RawPreview {
     pub width: u32,
@@ -58,6 +107,9 @@ const MAX_PREVIEW_DIM: u32 = 20_000;
 /// Read `path` and extract its embedded preview. Returns None when the file can't
 /// be read or carries no usable preview.
 pub fn extract(path: &Path) -> Option<RawPreview> {
+    expect_stats(path);
+    // Dropped last, once the stats are in the cache.
+    let _under_way = StatsUnderWay(path);
     let data = std::fs::read(path).ok()?;
     let mut preview = extract_from_bytes(&data)?;
     preview.exif = crate::raw_exif::exif_summary(&data);
@@ -357,6 +409,40 @@ mod tests {
 
         let p = extract_from_bytes(&data).expect("should fall back to the baseline JPEG");
         assert_eq!((p.width, p.height), (80, 60));
+    }
+
+    #[test]
+    fn a_decode_waits_for_the_stats_an_extract_is_measuring() {
+        let path = std::env::temp_dir().join(format!("iai_stats_wait_{}.nef", std::process::id()));
+        // Nothing under way: no wait, no stats.
+        let started = std::time::Instant::now();
+        assert!(stats_when_measured(&path, std::time::Duration::from_secs(5)).is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+
+        let mut data = vec![0u8; 64];
+        data.extend_from_slice(&jpeg_bytes(64, 48, [90, 120, 150]));
+        std::fs::write(&path, &data).unwrap();
+        expect_stats(&path);
+        let worker = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                extract(&path).is_some()
+            })
+        };
+        let stats = stats_when_measured(&path, std::time::Duration::from_secs(10));
+        assert!(worker.join().unwrap());
+        let _ = std::fs::remove_file(&path);
+        forget_cached_mean_luma(&path);
+        assert!(
+            stats.is_some(),
+            "the waiting decode gets the extract's stats"
+        );
+
+        // An extract that never comes is not waited for past the patience.
+        expect_stats(&path);
+        assert!(stats_when_measured(&path, std::time::Duration::from_millis(30)).is_none());
+        drop(StatsUnderWay(&path));
     }
 
     #[test]

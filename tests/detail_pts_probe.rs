@@ -55,7 +55,7 @@ fn detail_pts_probe() {
         };
         let name = job["name"].as_str().unwrap();
         let t0 = std::time::Instant::now();
-        let out = apply_scene_to_tilemap(&scene, &settings, None).flatten16();
+        let out = apply_scene_to_tilemap(&scene, &settings).flatten16();
         let bytes: Vec<u8> = out.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(out_dir.join(format!("{name}.bin")), bytes).unwrap();
         println!("{name}: {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);

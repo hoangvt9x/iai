@@ -14,6 +14,7 @@ pub mod psd_adjust;
 pub mod psd_descriptor;
 pub mod psd_text;
 pub mod raw;
+pub mod raw_cache;
 pub mod raw_exif;
 pub mod raw_library;
 pub mod raw_preview;

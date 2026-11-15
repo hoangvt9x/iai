@@ -545,7 +545,7 @@ fn raw_preview_commit_probe() {
         }
         eprintln!("\n== {name} ==");
         let t = std::time::Instant::now();
-        let committed_tiles = develop_scene::apply_scene_to_tilemap(&scene, &settings, None);
+        let committed_tiles = develop_scene::apply_scene_to_tilemap(&scene, &settings);
         let committed = committed_tiles.flatten();
         eprintln!("  commit {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
         let mut committed_stack = stack.clone();

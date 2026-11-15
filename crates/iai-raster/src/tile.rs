@@ -48,9 +48,7 @@ pub fn quantize_dither(v: f32, x: u32, y: u32, ch: u32) -> u8 {
         _ => (5, 2),
     };
     let t = bayer8(x.wrapping_add(ox), y.wrapping_add(oy));
-    (v.clamp(0.0, 1.0) * 255.0 + (t - 0.5))
-        .round()
-        .clamp(0.0, 255.0) as u8
+    crate::fast_math::round_u8(v.clamp(0.0, 1.0) * 255.0 + (t - 0.5))
 }
 
 /// Down-convert one 16-bit channel to u8 with the same ordered dither as
@@ -124,14 +122,20 @@ impl Tile {
     /// 16-bit master and a down-converted 8-bit mirror for display/tools.
     pub fn from_rgba16(px16: Vec<u16>) -> Self {
         let mut pixels = vec![0u8; TILE_BYTES];
-        for p in 0..TILE_PIXELS {
-            let x = (p % TILE_SIZE as usize) as u32;
-            let y = (p / TILE_SIZE as usize) as u32;
-            let i = p * 4;
-            pixels[i] = dither16_to_u8(px16[i], x, y, 0);
-            pixels[i + 1] = dither16_to_u8(px16[i + 1], x, y, 1);
-            pixels[i + 2] = dither16_to_u8(px16[i + 2], x, y, 2);
-            pixels[i + 3] = (px16[i + 3] >> 8) as u8; // alpha: never dithered
+        let row_len = TILE_SIZE as usize * 4;
+        for (y, (out, src)) in pixels
+            .chunks_exact_mut(row_len)
+            .zip(px16.chunks_exact(row_len))
+            .enumerate()
+        {
+            let y = y as u32;
+            for (x, (o, s)) in out.chunks_exact_mut(4).zip(src.chunks_exact(4)).enumerate() {
+                let x = x as u32;
+                o[0] = dither16_to_u8(s[0], x, y, 0);
+                o[1] = dither16_to_u8(s[1], x, y, 1);
+                o[2] = dither16_to_u8(s[2], x, y, 2);
+                o[3] = (s[3] >> 8) as u8; // alpha: never dithered
+            }
         }
         Self {
             pixels,
@@ -533,23 +537,22 @@ impl TileMap {
                         y: ty as i32,
                     };
                     let mut buf = vec![0u16; TILE_PIXELS * 4];
-                    let start_y = ty * TILE_SIZE;
-                    let start_x = tx * TILE_SIZE;
-                    for r in 0..TILE_SIZE {
-                        let py = start_y + r;
-                        if py >= height {
-                            break;
-                        }
-                        for c in 0..TILE_SIZE {
-                            let px = start_x + c;
-                            if px >= width {
-                                break;
-                            }
-                            let si = ((py * width + px) * 4) as usize;
-                            let di = ((r * TILE_SIZE + c) * 4) as usize;
-                            if si + 3 < px16.len() {
-                                buf[di..di + 4].copy_from_slice(&px16[si..si + 4]);
-                            }
+                    let start_y = (ty * TILE_SIZE) as usize;
+                    let start_x = (tx * TILE_SIZE) as usize;
+                    let (w, h) = (width as usize, height as usize);
+                    let row_px = (TILE_SIZE as usize).min(w - start_x);
+                    let rows = (TILE_SIZE as usize).min(h - start_y);
+                    for (r, dst) in buf
+                        .chunks_exact_mut(TILE_SIZE as usize * 4)
+                        .take(rows)
+                        .enumerate()
+                    {
+                        let si = ((start_y + r) * w + start_x) * 4;
+                        // A short source copies what it has, as the per-pixel
+                        // copy this replaces did.
+                        let have = px16.len().saturating_sub(si).min(row_px * 4) / 4 * 4;
+                        if have > 0 {
+                            dst[..have].copy_from_slice(&px16[si..si + have]);
                         }
                     }
                     (pos, Tile::from_rgba16(buf))
@@ -2246,6 +2249,30 @@ impl BilinearCursor<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dither_without_libm_round_is_the_same() {
+        for v in 0..=u16::MAX {
+            for (x, y) in (0..8).flat_map(|x| (0..8).map(move |y| (x, y))) {
+                for ch in 0..3 {
+                    let (ox, oy) = match ch {
+                        0 => (0u32, 0u32),
+                        1 => (2, 5),
+                        _ => (5, 2),
+                    };
+                    let t = bayer8(x + ox, y + oy);
+                    let before = ((v as f32 / 65535.0).clamp(0.0, 1.0) * 255.0 + (t - 0.5))
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                    assert_eq!(
+                        dither16_to_u8(v, x, y, ch),
+                        before,
+                        "{v} at {x},{y} ch {ch}"
+                    );
+                }
+            }
+        }
+    }
 
     /// The bilinear sampler as it was before it read through a dense index
     /// and a reusing cursor; every path must still match it exactly.

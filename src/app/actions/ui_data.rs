@@ -1740,6 +1740,12 @@ impl App {
                     .iter()
                     .any(|e| e.doc == active_id && e.transient)
             },
+            develop_open_count: 1 + self
+                .dev
+                .develop_marked
+                .iter()
+                .filter(|doc| **doc != self.docs.active().id)
+                .count(),
             develop_sections_open: self.dev.develop_sections_open,
             develop_exif: self.docs.active().raw_exif.clone(),
             develop_readout: self.dev.develop_readout,

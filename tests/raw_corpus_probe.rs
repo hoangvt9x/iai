@@ -135,7 +135,7 @@ fn raw_corpus_decodes_and_renders_through_develop2() {
 
         // Neutral Develop3 render must produce a full-size result.
         let t1 = Instant::now();
-        let tile = develop2::execute_scene(scene, &DevelopSettings::default(), None)
+        let tile = develop2::execute_scene(scene, &DevelopSettings::default())
             .expect("neutral Develop3 must render a RAW scene");
         let dev_ms = t1.elapsed().as_millis();
         assert_eq!(

@@ -790,13 +790,16 @@ pub(crate) fn develop_panel_contents(
                 {
                     cancel = true;
                 }
-                let commit_label = if data.develop.develop_mode {
-                    "Open Image"
+                let open_count = data.develop.develop_open_count;
+                let (commit_label, commit_w) = if !data.develop.develop_mode {
+                    ("OK".to_string(), 82.0)
+                } else if open_count > 1 {
+                    (format!("Open {open_count} Images"), 100.0)
                 } else {
-                    "OK"
+                    ("Open Image".to_string(), 82.0)
                 };
                 if ui
-                    .add_sized([82.0, 22.0], egui::Button::new(commit_label))
+                    .add_sized([commit_w, 22.0], egui::Button::new(commit_label))
                     .clicked()
                 {
                     apply = true;

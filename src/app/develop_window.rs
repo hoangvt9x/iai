@@ -33,6 +33,16 @@ fn develop_session_entry_blocks_commit(decode_in_flight: bool, decode_failed: bo
     decode_in_flight || decode_failed
 }
 
+/// Whether RAW images open at 16 bits/channel (the default) or 8, which takes
+/// a third of the memory. Remembered in prefs.json.
+pub(crate) fn raw_open_16bit() -> bool {
+    crate::core::prefs_store::get::<bool>("raw_open_16bit").unwrap_or(true)
+}
+
+fn set_raw_open_16bit(sixteen: bool) {
+    crate::core::prefs_store::set("raw_open_16bit", &sixteen);
+}
+
 fn develop_commit_targets_entry(
     entry: crate::core::document::DocumentId,
     active: crate::core::document::DocumentId,
@@ -166,7 +176,10 @@ impl App {
         // The session first: no point in a window without one. Starts the live
         // preview and sets ui.show_develop_dialog (which the in-canvas dialog
         // uses as its fallback gate).
-        if !self.begin_develop_preview(crate::core::develop::DevelopSettings::default()) {
+        let remembered = self
+            .remembered_raw_settings(self.docs.active().id)
+            .unwrap_or_default();
+        if !self.begin_develop_preview(remembered) {
             self.shell.status_msg = "Develop requires an unlocked raster layer".to_string();
             if let Some(w) = &self.win.window {
                 w.request_redraw();
@@ -323,6 +336,9 @@ impl App {
         if self.win.develop_window.is_none() || self.dev.develop_bake_all.is_some() {
             return;
         }
+        self.dev
+            .develop_commit_asked_at
+            .get_or_insert_with(std::time::Instant::now);
         let active_id = self.docs.active().id;
         let active_waiting = self
             .dev
@@ -338,13 +354,24 @@ impl App {
             });
         if active_waiting || self.docs.active().deferred_raw {
             self.ensure_raw_resident(self.docs.active_doc_idx);
-            self.shell.status_msg =
-                "Wait for the selected RAW to finish decoding, or select another image".to_string();
+            if self.jobs.raw_preview_failures.contains_key(&active_id) {
+                self.dev.develop_commit_when_decoded = false;
+                self.dev.develop_commit_asked_at = None;
+                self.shell.status_msg =
+                    "Ảnh RAW này không giải mã được: hãy chọn ảnh khác".to_string();
+            } else {
+                // Remember the press: the render loop opens the image as
+                // soon as its full decode lands.
+                self.dev.develop_commit_when_decoded = true;
+                self.shell.status_msg = "Đang giải mã ảnh, xong sẽ tự mở vào canvas…".to_string();
+            }
             if let Some(w) = &self.win.develop_window {
+                w.set_title(&self.develop_window_title());
                 w.request_redraw();
             }
             return;
         }
+        self.dev.develop_commit_when_decoded = false;
         // Never tear down a live GPU approximation directly into CPU-committed
         // tiles. Arm (or wait for) the exact settled bake first; the render loop
         // resumes this commit automatically as soon as those tiles land.
@@ -368,6 +395,7 @@ impl App {
         }
         self.dev.develop_commit_after_refine = false;
         self.develop_session_save_active_settings();
+        self.remember_develop_session_settings();
         // Open commits the current selection only. Drop the preview receiver so
         // late thumbnails from the original file-dialog batch cannot create a
         // fresh Develop session after this window tears down.
@@ -380,22 +408,45 @@ impl App {
         // preview is dropped — without restoring — the moment its document's
         // baked tiles land (poll_develop_bake_all), so the edited look stays
         // on screen from the click to the final canvas.
+        self.start_develop_open(active_id, !raw_open_16bit());
+    }
+
+    /// Queue «Open Image» for the active session image and every marked one
+    /// (one at a time, each with its own settings) and start the first bake;
+    /// the other transient images are closed.
+    pub(crate) fn start_develop_open(
+        &mut self,
+        active_id: crate::core::document::DocumentId,
+        eight_bit: bool,
+    ) {
         let entries = std::mem::take(&mut self.dev.develop_session);
-        let active_entry = entries
+        let marked = std::mem::take(&mut self.dev.develop_marked);
+        // The active image first (its settled preview lands at once), then
+        // the marked ones in filmstrip order.
+        let chosen: Vec<&crate::app::state::DevelopSessionEntry> = entries
             .iter()
-            .find(|entry| develop_commit_targets_entry(entry.doc, active_id));
-        let single_raw = active_entry.is_some_and(|entry| entry.transient);
+            .filter(|entry| develop_commit_targets_entry(entry.doc, active_id))
+            .chain(entries.iter().filter(|entry| {
+                !develop_commit_targets_entry(entry.doc, active_id) && marked.contains(&entry.doc)
+            }))
+            .collect();
+        let single_raw = chosen.len() == 1 && chosen[0].transient;
         let discarded: Vec<_> = entries
             .iter()
-            .filter(|entry| !develop_commit_targets_entry(entry.doc, active_id) && entry.transient)
+            .filter(|entry| entry.transient && !chosen.iter().any(|c| c.doc == entry.doc))
             .map(|entry| entry.doc)
             .collect();
-        self.discard_transient_develop_docs(&discarded);
-        let pending: std::collections::VecDeque<_> = active_entry
-            .map(|entry| (entry.doc, entry.settings.clone()))
-            .into_iter()
+        let fresh: Vec<_> = chosen
+            .iter()
+            .filter(|entry| entry.transient)
+            .map(|entry| entry.doc)
             .collect();
-        let total_images = usize::from(!pending.is_empty());
+        let pending: std::collections::VecDeque<_> = chosen
+            .iter()
+            .map(|entry| (entry.doc, entry.settings.clone()))
+            .collect();
+        self.discard_transient_develop_docs(&discarded);
+        let total_images = pending.len();
         if pending.is_empty() {
             self.finish_develop_bake_all(total_images, 0, single_raw);
             return;
@@ -409,7 +460,10 @@ impl App {
             done: 0,
             developed: 0,
             single_raw,
+            reused_preview: false,
             rx: None,
+            fresh,
+            eight_bit,
         });
         self.develop_bake_all_start_next();
     }
@@ -437,10 +491,57 @@ impl App {
         self.teardown_develop_window();
     }
 
+    /// A filmstrip click: Ctrl marks / unmarks the image for «Open Image»,
+    /// Shift marks the run from the active image to it, a plain click makes
+    /// it the active image and clears the marks.
+    fn develop_filmstrip_click(
+        &mut self,
+        doc: crate::core::document::DocumentId,
+        modifiers: egui::Modifiers,
+    ) {
+        let active = self
+            .dev
+            .develop_switch_pending
+            .map_or(self.docs.active().id, |(pending, _)| pending);
+        let order: Vec<_> = self.dev.develop_session.iter().map(|e| e.doc).collect();
+        if modifiers.shift {
+            let (Some(a), Some(b)) = (
+                order.iter().position(|d| *d == active),
+                order.iter().position(|d| *d == doc),
+            ) else {
+                return;
+            };
+            for id in &order[a.min(b)..=a.max(b)] {
+                if !self.dev.develop_marked.contains(id) {
+                    self.dev.develop_marked.push(*id);
+                }
+            }
+        } else if modifiers.command || modifiers.ctrl {
+            if doc == active {
+                return;
+            }
+            if let Some(pos) = self.dev.develop_marked.iter().position(|d| *d == doc) {
+                self.dev.develop_marked.remove(pos);
+            } else {
+                self.dev.develop_marked.push(doc);
+            }
+        } else {
+            self.dev.develop_marked.clear();
+            if doc != active {
+                self.develop_session_activate(doc);
+            }
+        }
+        if let Some(w) = &self.win.develop_window {
+            w.request_redraw();
+        }
+    }
+
     /// Drop the Develop window's OS window, egui context and GPU surface. The
     /// session (commit/cancel) is handled by the caller.
     fn teardown_develop_window(&mut self) {
         self.dev.develop_commit_after_refine = false;
+        self.dev.develop_commit_when_decoded = false;
+        self.dev.develop_commit_asked_at = None;
         self.win.develop_egui_state = None;
         self.win.develop_egui_ctx = None;
         // Stop treating it as the active Develop host immediately, but keep the
@@ -454,6 +555,7 @@ impl App {
         self.dev.develop_thumbs.clear();
         // Parked RAW images and their background work belong to the session.
         self.dev.develop_switch_pending = None;
+        self.dev.develop_marked.clear();
         self.cancel_raw_prefetch();
         self.jobs.raw_prefetch_failed.clear();
         for doc in &mut self.docs.documents {
@@ -780,6 +882,17 @@ impl App {
         // until Windows generates another paint event (for example after a
         // minimize/restore cycle).
         self.poll_develop_preview();
+        // Open Image was pressed while the selected RAW was decoding: go on
+        // now that it has landed (or give up on a decode that failed).
+        if self.dev.develop_commit_when_decoded {
+            let active = self.docs.active();
+            let active_id = active.id;
+            if self.jobs.raw_preview_failures.contains_key(&active_id)
+                || (!active.deferred_raw && !self.raw_decode_in_flight_for_doc(active_id))
+            {
+                self.commit_develop_window();
+            }
+        }
         if self.dev.develop_commit_after_refine
             && self.dev.develop_preview.as_ref().is_some_and(|p| {
                 !p.gpu_preview_active
@@ -821,7 +934,8 @@ impl App {
         // state.
         let active_id = self.docs.active().id;
         let active_raw_loading = self.raw_decode_in_flight_for_doc(active_id);
-        let active_raw_deferred = self.docs.active().deferred_raw;
+        let active_on_draft = self.raw_draft_editable(active_id);
+        let active_raw_deferred = self.docs.active().deferred_raw && !active_on_draft;
         let active_raw_draft = self.docs.active().raw_draft;
         let active_raw_failure = self.jobs.raw_preview_failures.get(&active_id).cloned();
         // Histogram R/G/B readout for the pixel under the cursor (D4).
@@ -832,6 +946,7 @@ impl App {
             Option<(egui::TextureId, egui::Vec2)>,
             bool,
             Option<String>,
+            bool,
         )> = if self.dev.develop_session.len() > 1 {
             self.dev
                 .develop_session
@@ -870,13 +985,21 @@ impl App {
                         .dev
                         .develop_switch_pending
                         .map_or(active_id, |(pending, _)| pending);
-                    (e.doc, title, tex, e.doc == highlighted, state)
+                    let marked = self.dev.develop_marked.contains(&e.doc);
+                    (e.doc, title, tex, e.doc == highlighted, state, marked)
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        let mut filmstrip_clicked: Option<crate::core::document::DocumentId> = None;
+        let mut filmstrip_clicked: Option<(crate::core::document::DocumentId, egui::Modifiers)> =
+            None;
+        let mut mark_all: Option<bool> = None;
+        let any_marked = !self.dev.develop_marked.is_empty();
+        // The 8 / 16-bit choice applies to RAW images this window opens.
+        let show_bits = self.dev.develop_session.iter().any(|e| e.transient);
+        let sixteen_before = raw_open_16bit();
+        let mut sixteen = sixteen_before;
         // Mid-"Open Image": the panel is replaced by a progress readout.
         let bake_progress = self
             .dev
@@ -942,7 +1065,7 @@ impl App {
                             ui.add(egui::Spinner::new().size(28.0));
                             ui.add_space(8.0);
                             ui.label(format!(
-                                "Developing image {} of {}…",
+                                "Đang mở ảnh {} / {}…",
                                 (done + 1).min(total),
                                 total
                             ));
@@ -982,6 +1105,13 @@ impl App {
                         });
                         return;
                     }
+                    if active_on_draft {
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(14.0));
+                            ui.label("Đang làm ảnh đủ nét, vẫn chỉnh được");
+                        });
+                    }
                     ui.add_space(6.0);
                     // Profile picker (stub): one built-in look for now — the
                     // disabled dropdown marks where camera/creative profiles land.
@@ -995,7 +1125,14 @@ impl App {
                         fit_clicked = ui.button("Fit").clicked();
                         reset_100 = ui.button("100%").clicked();
                         ui.label(format!("{zoom_pct:.0}%"));
-                        ui.label("· scroll=zoom, mid-drag=pan");
+                        if show_bits {
+                            ui.checkbox(&mut sixteen, "16-bit").on_hover_text(
+                                "Bật: ảnh mở ra 16-bit, chỉnh tiếp mịn hơn.\n\
+                                 Tắt: mở 8-bit, tốn RAM bằng một phần ba (nên tắt khi mở nhiều ảnh).",
+                            );
+                        } else {
+                            ui.label("· scroll=zoom, mid-drag=pan");
+                        }
                     });
                     ui.separator();
                     let panel_h = ui.available_height();
@@ -1014,26 +1151,52 @@ impl App {
                 egui::TopBottomPanel::bottom("develop_filmstrip")
                     .exact_height(FILMSTRIP_H)
                     .show(ctx, |ui| {
+                        let modifiers = ctx.input(|i| i.modifiers);
                         egui::ScrollArea::horizontal().show(ui, |ui| {
                             ui.horizontal_centered(|ui| {
-                                for (doc, title, tex, active, state) in &filmstrip {
+                                let label = if any_marked { "Bỏ chọn" } else { "Chọn hết" };
+                                if ui
+                                    .button(label)
+                                    .on_hover_text(
+                                        "Chọn nhiều ảnh để mở một lượt: Ctrl + bấm từng ảnh, \
+                                         Shift + bấm để chọn một dãy.",
+                                    )
+                                    .clicked()
+                                {
+                                    mark_all = Some(!any_marked);
+                                }
+                                for (doc, title, tex, active, state, marked) in &filmstrip {
                                     let resp = match tex {
                                         Some((id, size)) => ui.add(
                                             egui::ImageButton::new(egui::load::SizedTexture::new(
                                                 *id, *size,
                                             ))
-                                            .selected(*active),
+                                            .selected(*active || *marked),
                                         ),
                                         None => ui.add(
-                                            egui::Button::new(title.as_str()).selected(*active),
+                                            egui::Button::new(title.as_str())
+                                                .selected(*active || *marked),
                                         ),
                                     }
                                     .on_hover_text(match state {
                                         Some(state) => format!("{title}\n{state}"),
                                         None => title.clone(),
                                     });
-                                    if resp.clicked() && !*active {
-                                        filmstrip_clicked = Some(*doc);
+                                    if *active {
+                                        // The image being edited stands out
+                                        // from the others marked to open.
+                                        ui.painter().rect_stroke(
+                                            resp.rect.expand(1.0),
+                                            3.0,
+                                            egui::Stroke::new(
+                                                2.0_f32,
+                                                ui.visuals().selection.stroke.color,
+                                            ),
+                                            egui::StrokeKind::Outside,
+                                        );
+                                    }
+                                    if resp.clicked() {
+                                        filmstrip_clicked = Some((*doc, modifiers));
                                     }
                                 }
                             });
@@ -1137,8 +1300,18 @@ impl App {
         self.handle_color_print_actions(&mut actions);
         // Filmstrip switch (after the settings above — they belong to the image
         // the panel was showing this frame).
-        if let Some(doc) = filmstrip_clicked {
-            self.develop_session_activate(doc);
+        if sixteen != sixteen_before {
+            set_raw_open_16bit(sixteen);
+        }
+        if let Some(all) = mark_all {
+            self.dev.develop_marked = if all {
+                self.dev.develop_session.iter().map(|e| e.doc).collect()
+            } else {
+                Vec::new()
+            };
+        }
+        if let Some((doc, modifiers)) = filmstrip_clicked {
+            self.develop_filmstrip_click(doc, modifiers);
         }
         if apply_dev {
             self.commit_develop_window();
@@ -1363,6 +1536,8 @@ impl App {
         }
         if self.jobs.raw_preview_failures.contains_key(&doc.id) {
             title.push_str(" - RAW decode failed");
+        } else if self.dev.develop_commit_when_decoded {
+            title.push_str(" - Đang giải mã, xong sẽ tự mở");
         } else if self.raw_decode_in_flight_for_doc(doc.id) {
             title.push_str(" - Decoding RAW...");
         } else if doc.deferred_raw {

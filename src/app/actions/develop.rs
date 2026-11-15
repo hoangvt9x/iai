@@ -18,6 +18,21 @@ const DEVELOP_SWITCH_WAIT: std::time::Duration = std::time::Duration::from_milli
 /// back to the legacy display-domain engine.
 const SCENE_IDENTITY_MAX_PIXELS: u64 = 16384 * 16384;
 
+/// The layer's tiles hold the finished full-resolution render of exactly
+/// `settings`: no GPU approximation on top, no bake in flight or queued.
+fn develop_preview_is_settled_on(
+    preview: &crate::app::state::DevelopPreviewState,
+    settings: &crate::core::develop::DevelopSettings,
+) -> bool {
+    !preview.gpu_preview_active
+        && !preview.processing
+        && preview.rx.is_none()
+        && preview.pending_settings.is_none()
+        && preview.detail_refine_at.is_none()
+        && !settings.is_neutral()
+        && preview.last_preview_settings.same_image_effect(settings)
+}
+
 impl App {
     /// Re-bin the live histogram from the cached source proxy through `settings`.
     pub(super) fn rebin_develop_histogram(
@@ -155,13 +170,40 @@ impl App {
     /// Record `doc` as part of the Develop session (no-op if already present).
     pub(crate) fn develop_session_push(&mut self, doc: DocumentId, transient: bool) {
         if !self.dev.develop_session.iter().any(|e| e.doc == doc) {
+            let settings = self.remembered_raw_settings(doc).unwrap_or_default();
             self.dev
                 .develop_session
                 .push(crate::app::state::DevelopSessionEntry {
                     doc,
                     transient,
-                    settings: crate::core::develop::DevelopSettings::default(),
+                    settings,
                 });
+        }
+    }
+
+    /// The settings last opened for this document's RAW file (see
+    /// `raw_memory`), while it is still the RAW and not baked pixels.
+    pub(crate) fn remembered_raw_settings(
+        &self,
+        doc: DocumentId,
+    ) -> Option<crate::core::develop::DevelopSettings> {
+        let doc = self.docs.by_id(doc)?;
+        let path = doc.path.as_ref()?;
+        let still_raw = doc.deferred_raw || doc.canvas.develop_source.is_some();
+        (still_raw && crate::formats::raw::is_raw_path(path))
+            .then(|| crate::app::raw_memory::recall(path))
+            .flatten()
+    }
+
+    /// Remember every session RAW's settings for its file (on «Open Image»).
+    pub(crate) fn remember_develop_session_settings(&self) {
+        for entry in self.dev.develop_session.iter().filter(|e| e.transient) {
+            let Some(path) = self.docs.by_id(entry.doc).and_then(|d| d.path.as_ref()) else {
+                continue;
+            };
+            if crate::formats::raw::is_raw_path(path) {
+                crate::app::raw_memory::remember(path, &entry.settings);
+            }
         }
     }
 
@@ -208,6 +250,8 @@ impl App {
             && !target.raw_draft
             && self.dev.develop_bake_all.is_none()
             && !self.jobs.raw_preview_failures.contains_key(&doc);
+        // An "Open Image" waiting for the image being left is called off.
+        self.dev.develop_commit_when_decoded = false;
         if parked {
             self.dev.develop_switch_pending = Some((doc, std::time::Instant::now()));
             self.ensure_raw_resident(idx);
@@ -359,6 +403,7 @@ impl App {
         self.shell.ui.show_develop_dialog = false;
         self.cancel_develop_preview();
         self.dev.develop_session.clear();
+        self.dev.develop_marked.clear();
         self.dev.develop_switch_pending = None;
         self.cancel_raw_prefetch();
     }
@@ -421,7 +466,24 @@ impl App {
             // deferred, but need no pixel worker. Opening them consumes the RAW
             // scene master and leaves the decoded raster as the document.
             if settings.is_neutral() {
-                self.docs.documents[doc_idx].canvas.develop_source = None;
+                let eight_bit = self
+                    .dev
+                    .develop_bake_all
+                    .as_ref()
+                    .is_some_and(|s| s.eight_bit && s.fresh.contains(&doc_id));
+                let canvas = &mut self.docs.documents[doc_idx].canvas;
+                canvas.develop_source = None;
+                if eight_bit {
+                    canvas.set_bit_depth(false);
+                    // The GPU copy goes 8-bit too.
+                    for layer in &mut canvas.layer_stack.layers {
+                        layer.tiles.bump_all_revisions();
+                    }
+                    canvas.layer_revision += 1;
+                    if doc_idx == self.docs.active_doc_idx {
+                        self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+                    }
+                }
                 if let Some(state) = &mut self.dev.develop_bake_all {
                     state.done += 1;
                 }
@@ -448,6 +510,35 @@ impl App {
                 continue;
             }
             let layer_id = layer.id;
+            // The settled preview already is this bake (same source, same
+            // settings, at full resolution): land its tiles instead of
+            // rendering the whole image a second time.
+            if let Some(preview) = self.dev.develop_preview.as_ref().filter(|p| {
+                p.doc_id == doc_id
+                    && p.layer_id == layer_id
+                    && develop_preview_is_settled_on(p, &settings)
+            }) {
+                let mut tiles = layer.tiles.clone();
+                tiles.bump_all_revisions();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let _ = tx.send(crate::app::state::DevelopBakeAllResult {
+                    doc: doc_id,
+                    layer_id,
+                    original_tiles: preview.original_tiles.clone(),
+                    tiles,
+                });
+                if let Some(state) = &mut self.dev.develop_bake_all {
+                    state.rx = Some(rx);
+                    state.reused_preview = true;
+                }
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                if let Some(w) = &self.win.develop_window {
+                    w.request_redraw();
+                }
+                return;
+            }
             let original_tiles = match &preview_pristine {
                 Some((pdoc, player, tiles)) if *pdoc == doc_id && *player == layer_id => {
                     tiles.clone()
@@ -482,9 +573,11 @@ impl App {
                     })
                 });
                 let mut tiles = match &scene {
-                    Some(sc) => {
-                        crate::core::develop_scene::apply_scene_to_tilemap(sc, &settings, selection)
-                    }
+                    Some(sc) => within_selection(
+                        crate::core::develop_scene::apply_scene_to_tilemap(sc, &settings),
+                        &original_tiles,
+                        selection.as_ref(),
+                    ),
                     None => crate::core::develop::apply_to_tilemap_direct(
                         &original_tiles,
                         &settings,
@@ -544,17 +637,38 @@ impl App {
                 self.dev.develop_preview = None;
                 self.clear_develop_gpu_commit_state();
             }
+            let (fresh, eight_bit) =
+                self.dev
+                    .develop_bake_all
+                    .as_ref()
+                    .map_or((false, false), |s| {
+                        let fresh = s.fresh.contains(&res.doc);
+                        (fresh, fresh && s.eight_bit)
+                    });
             if let Some(idx) = self.docs.index_of(res.doc) {
                 let canvas = &mut self.docs.documents[idx].canvas;
                 // Commit = baked (PTS semantics): the scene master is consumed.
                 canvas.develop_source = None;
-                if canvas.commit_layer_tiles_change(
-                    res.layer_id,
-                    res.original_tiles,
-                    res.tiles,
-                    "Develop",
-                ) && idx == self.docs.active_doc_idx
-                {
+                let landed = if fresh {
+                    drop(res.original_tiles);
+                    let mut tiles = res.tiles;
+                    if eight_bit {
+                        // Before landing, so no 16-bit copy reaches the GPU.
+                        tiles.drop_hdr();
+                    }
+                    canvas.replace_layer_tiles_untracked(res.layer_id, tiles)
+                } else {
+                    canvas.commit_layer_tiles_change(
+                        res.layer_id,
+                        res.original_tiles,
+                        res.tiles,
+                        "Develop",
+                    )
+                };
+                if landed && eight_bit {
+                    canvas.set_bit_depth(false);
+                }
+                if landed && idx == self.docs.active_doc_idx {
                     self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
                 }
             }
@@ -584,6 +698,21 @@ impl App {
                 .develop_bake_all
                 .take()
                 .expect("checked Some above");
+            let asked = self.dev.develop_commit_asked_at.unwrap_or(st.started_at);
+            crate::diag::note(
+                "perf",
+                &format!(
+                    "develop open took {} ms from the press (settled frame {} ms, bake {} ms{})",
+                    asked.elapsed().as_millis(),
+                    st.started_at.saturating_duration_since(asked).as_millis(),
+                    st.started_at.elapsed().as_millis(),
+                    if st.reused_preview {
+                        ", the settled frame reused"
+                    } else {
+                        ""
+                    }
+                ),
+            );
             self.finish_develop_bake_all(st.total_images, st.developed, st.single_raw);
         }
     }
@@ -610,8 +739,9 @@ impl App {
         // update_develop_preview is gated. Skip building the f16 identity
         // master for it (8 bytes/px + a full-image pass, discarded the moment
         // the real decode replaces the canvas and this preview restarts).
-        let decode_placeholder = self.jobs.raw_preview_docs.values().any(|id| *id == doc_id)
-            || self.jobs.raw_preview_failures.contains_key(&doc_id);
+        let decode_placeholder = (self.jobs.raw_preview_docs.values().any(|id| *id == doc_id)
+            || self.jobs.raw_preview_failures.contains_key(&doc_id))
+            && !self.raw_draft_editable(doc_id);
         // Commit means APPLIED (PTS semantics): every session starts from the
         // layer's current pixels with neutral sliders. Keeping the previous
         // settings is a preset's job, not the panel's.
@@ -710,12 +840,13 @@ impl App {
         settings: crate::core::develop::DevelopSettings,
     ) -> bool {
         let active_id = self.docs.active().id;
-        if self
+        if (self
             .jobs
             .raw_preview_docs
             .values()
             .any(|id| *id == active_id)
-            || self.jobs.raw_preview_failures.contains_key(&active_id)
+            || self.jobs.raw_preview_failures.contains_key(&active_id))
+            && !self.raw_draft_editable(active_id)
         {
             return false;
         }
@@ -797,7 +928,7 @@ impl App {
             .as_ref()
             .is_some_and(|gpu| gpu.compositor.develops_on_gpu())
             && scene_fits_gpu
-            && !self.docs.active().canvas.selection.active
+            && self.develop_gpu_selection_ok(layer_id)
             && !in_isolated_group
         {
             return self.apply_develop_preview_gpu(settings);
@@ -1022,9 +1153,11 @@ impl App {
 
         rayon::spawn(move || {
             let tiles = match &scene {
-                Some(sc) => {
-                    crate::core::develop_scene::apply_scene_to_tilemap(sc, &settings, selection)
-                }
+                Some(sc) => within_selection(
+                    crate::core::develop_scene::apply_scene_to_tilemap(sc, &settings),
+                    &source_tiles,
+                    selection.as_ref(),
+                ),
                 None => crate::core::develop::apply_to_tilemap_direct(
                     &source_tiles,
                     &settings,
@@ -1370,9 +1503,11 @@ impl App {
             source_tiles
         } else {
             match &scene {
-                Some(sc) => {
-                    crate::core::develop_scene::apply_scene_to_tilemap(sc, &settings, selection)
-                }
+                Some(sc) => within_selection(
+                    crate::core::develop_scene::apply_scene_to_tilemap(sc, &settings),
+                    &source_tiles,
+                    selection.as_ref(),
+                ),
                 None => crate::core::develop::apply_to_tilemap_direct(
                     &source_tiles,
                     &settings,
@@ -1458,5 +1593,17 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// A scene render covers the whole layer; with a selection, keep it there only.
+fn within_selection(
+    tiles: crate::core::tile::TileMap,
+    original: &crate::core::tile::TileMap,
+    selection: Option<&crate::core::develop::DevelopSelection>,
+) -> crate::core::tile::TileMap {
+    match selection {
+        Some(selection) => crate::core::develop::keep_within_selection(tiles, original, selection),
+        None => tiles,
     }
 }

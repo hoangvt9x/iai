@@ -301,6 +301,9 @@ impl App {
             None
         };
         let dev_preview = self.build_develop_gpu_preview();
+        let dev_selection_mask = dev_preview
+            .as_ref()
+            .and_then(|preview| self.develop_selection_mask(preview.layer_id));
         let grid_taps = self.develop_grid_taps();
         self.dev.develop_composited_taps = grid_taps;
         let allow_active_gpu_vector = self.active_vector_gpu_idle();
@@ -427,6 +430,11 @@ impl App {
                     stack
                 });
             let render_stack_ref = display_stack_owned.as_ref().unwrap_or(render_stack_ref);
+            let develop_selection_owned = dev_selection_mask.as_ref().and_then(|mask| {
+                let layer_id = gpu.compositor.develop_preview.as_ref()?.layer_id;
+                render_stack_ref.with_masked_copy_over(layer_id, mask)
+            });
+            let render_stack_ref = develop_selection_owned.as_ref().unwrap_or(render_stack_ref);
 
             gpu.composite_layers(
                 render_stack_ref,

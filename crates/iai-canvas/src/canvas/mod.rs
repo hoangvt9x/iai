@@ -477,8 +477,27 @@ impl Canvas {
         use rayon::prelude::*;
         let has_transparency = px16.par_chunks_exact(4).any(|pixel| pixel[3] < u16::MAX);
         let tiles = iai_raster::tile::TileMap::from_rgba16(&px16, width, height);
+        // The same ordered dither as the tiles' 8-bit mirror (its 8×8 pattern
+        // repeats within a tile, so canvas and tile coordinates agree): the flat
+        // buffer matches what `ensure_pixels` would rebuild from the tiles.
         let flat_pixels = if Self::fits_flat_buffer(width, height) {
-            px16.par_iter().map(|&v| (v >> 8) as u8).collect()
+            let row = width as usize * 4;
+            let mut flat = vec![0u8; px16.len()];
+            flat.par_chunks_mut(row.max(1))
+                .zip(px16.par_chunks(row.max(1)))
+                .enumerate()
+                .for_each(|(y, (out, src))| {
+                    let y = y as u32;
+                    for (x, (o, s)) in out.chunks_exact_mut(4).zip(src.chunks_exact(4)).enumerate()
+                    {
+                        let x = x as u32;
+                        o[0] = iai_raster::tile::dither16_to_u8(s[0], x, y, 0);
+                        o[1] = iai_raster::tile::dither16_to_u8(s[1], x, y, 1);
+                        o[2] = iai_raster::tile::dither16_to_u8(s[2], x, y, 2);
+                        o[3] = (s[3] >> 8) as u8;
+                    }
+                });
+            flat
         } else {
             Vec::new()
         };
@@ -1074,6 +1093,61 @@ impl Canvas {
         let dst = downscale_rgba(&src, w, h, tw, th);
         Canvas::from_rgba(dst, tw, th)
     }
+    /// [`Self::downscaled_thumbnail`] for a canvas that is one opaque raster
+    /// layer covering it (a decoded RAW): each thumbnail pixel is the mean of
+    /// four samples of its source block, read from the tiles directly, so the
+    /// whole image is never flattened. Any other canvas takes the exact path.
+    pub fn sampled_thumbnail(&self, max_dim: u32) -> Canvas {
+        use rayon::prelude::*;
+        let (w, h) = (self.width, self.height);
+        let layer = match self.layer_stack.layers.as_slice() {
+            [layer]
+                if layer.is_raster()
+                    && layer.visible
+                    && layer.offset == (0, 0)
+                    && (layer.width, layer.height) == (w, h) =>
+            {
+                layer
+            }
+            _ => return self.downscaled_thumbnail(max_dim),
+        };
+        let longest = w.max(h).max(1);
+        let scale = (max_dim.max(1) as f32 / longest as f32).min(1.0);
+        let tw = ((w as f32 * scale).round() as u32).clamp(1, w.max(1));
+        let th = ((h as f32 * scale).round() as u32).clamp(1, h.max(1));
+        if (tw, th) == (w, h) {
+            return self.downscaled_thumbnail(max_dim);
+        }
+        // The sample at `tap` quarters of the way through thumbnail cell `i`.
+        let source = |i: u32, tap: u64, thumb: u32, full: u32| -> u32 {
+            (((i as u64 * 4 + tap) * full as u64) / (thumb as u64 * 4)).min(full as u64 - 1) as u32
+        };
+        let mut out = vec![0u8; tw as usize * th as usize * 4];
+        out.par_chunks_mut(tw as usize * 4)
+            .enumerate()
+            .for_each(|(ty, row)| {
+                let ys = [source(ty as u32, 1, th, h), source(ty as u32, 3, th, h)];
+                for tx in 0..tw {
+                    let xs = [source(tx, 1, tw, w), source(tx, 3, tw, w)];
+                    let mut sum = [0u32; 4];
+                    for y in ys {
+                        for x in xs {
+                            let (r, g, b, a) = layer.tiles.get_pixel(x, y);
+                            sum[0] += r as u32;
+                            sum[1] += g as u32;
+                            sum[2] += b as u32;
+                            sum[3] += a as u32;
+                        }
+                    }
+                    let px = &mut row[tx as usize * 4..][..4];
+                    for (dst, total) in px.iter_mut().zip(sum) {
+                        *dst = ((total + 2) / 4) as u8;
+                    }
+                }
+            });
+        Canvas::from_rgba(out, tw, th)
+    }
+
     pub fn history_entries(&self) -> Vec<iai_history::command::HistoryEntry> {
         self.cmd_history.history_entries()
     }
@@ -1204,6 +1278,19 @@ impl Canvas {
 mod hdr_adjust_tests {
     use super::*;
     use iai_doc::layer::AdjustmentType;
+
+    #[test]
+    fn a_16_bit_canvas_flat_buffer_matches_its_tiles() {
+        // One 8-bit reading of a 16-bit image, whether from the flat buffer
+        // made at decode or from the tiles' mirror (15/11: they were dithered
+        // and truncated respectively, one level apart).
+        let (w, h) = (300u32, 270u32);
+        let px16: Vec<u16> = (0..w * h * 4)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 16) as u16)
+            .collect();
+        let canvas = Canvas::from_rgba16(px16, w, h);
+        assert_eq!(canvas.pixels, canvas.layer_stack.layers[0].tiles.flatten());
+    }
 
     #[test]
     fn flatten_full_frees_flat_cache_and_ensure_rebuilds_identically() {

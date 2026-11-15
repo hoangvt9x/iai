@@ -31,6 +31,10 @@ use rayon::prelude::*;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// How long a decode waits for the preview worker to finish measuring the
+/// embedded JPEG of the same file before measuring it itself.
+const PREVIEW_STATS_PATIENCE: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Error text of a decode abandoned through [`RawDecodeControl::cancel`].
 pub const RAW_DECODE_CANCELLED: &str = "RAW decode cancelled";
 
@@ -48,6 +52,50 @@ pub struct RawDecodeControl<'a> {
 impl RawDecodeControl<'_> {
     fn cancelled(&self) -> bool {
         self.cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+    }
+}
+
+/// Wall-clock of each decode stage, written to the diagnostics journal as one
+/// `perf` line (and to stderr when `IAI_RAW_TIMING` is set, for the probes).
+struct StageClock {
+    start: std::time::Instant,
+    last: std::time::Instant,
+    stages: Vec<(&'static str, u128)>,
+}
+
+impl StageClock {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            start: now,
+            last: now,
+            stages: Vec::with_capacity(12),
+        }
+    }
+
+    /// Close the stage that ran since the previous lap.
+    fn lap(&mut self, stage: &'static str) {
+        let now = std::time::Instant::now();
+        self.stages
+            .push((stage, now.duration_since(self.last).as_millis()));
+        self.last = now;
+    }
+
+    fn report(&self, megapixels: f64) {
+        let stages: Vec<String> = self
+            .stages
+            .iter()
+            .map(|(stage, ms)| format!("{stage} {ms}"))
+            .collect();
+        let text = format!(
+            "raw decode {megapixels:.1} MP in {} ms ({})",
+            self.start.elapsed().as_millis(),
+            stages.join(", ")
+        );
+        if std::env::var_os("IAI_RAW_TIMING").is_some() {
+            eprintln!("{text}");
+        }
+        iai_diag::note("perf", &text);
     }
 }
 
@@ -187,18 +235,36 @@ fn observed_channel_maxima(raw: &RawImage, area: ActiveArea) -> [f32; 4] {
     match raw.cpp {
         1 => {
             let mono = !raw.cfa.is_valid();
-            for r in area.top..area.top + area.height {
-                for c in area.left..area.left + area.width {
-                    let v = raw_value(&raw.data, r * raw.width + c);
-                    global = global.max(v);
-                    let ch = if mono {
-                        0
-                    } else {
-                        raw.cfa.color_at(r, c).min(3)
-                    };
-                    maxv[ch] = maxv[ch].max(v);
-                }
-            }
+            // A maximum does not depend on the order it is taken in.
+            let merge = |a: ([f32; 4], f32), b: ([f32; 4], f32)| {
+                (
+                    [
+                        a.0[0].max(b.0[0]),
+                        a.0[1].max(b.0[1]),
+                        a.0[2].max(b.0[2]),
+                        a.0[3].max(b.0[3]),
+                    ],
+                    a.1.max(b.1),
+                )
+            };
+            (maxv, global) = (area.top..area.top + area.height)
+                .into_par_iter()
+                .map(|r| {
+                    let mut row_max = [0.0f32; 4];
+                    let mut row_global = 0.0f32;
+                    for c in area.left..area.left + area.width {
+                        let v = raw_value(&raw.data, r * raw.width + c);
+                        row_global = row_global.max(v);
+                        let ch = if mono {
+                            0
+                        } else {
+                            raw.cfa.color_at(r, c).min(3)
+                        };
+                        row_max[ch] = row_max[ch].max(v);
+                    }
+                    (row_max, row_global)
+                })
+                .reduce(|| ([0.0f32; 4], 0.0f32), merge);
         }
         3 => {
             for r in area.top..area.top + area.height {
@@ -307,6 +373,7 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
 /// [`RawImporter::import`] with cancellation and an early draft; see
 /// [`RawDecodeControl`].
 pub fn decode_raw_controlled(path: &Path, control: RawDecodeControl<'_>) -> Result<Canvas, String> {
+    let mut clock = StageClock::new();
     // The camera-JPEG statistics for the colour match come from the embedded
     // preview. Unless the preview worker already measured them, measure them
     // while the sensor data decodes rather than after it (the draft needs
@@ -314,18 +381,22 @@ pub fn decode_raw_controlled(path: &Path, control: RawDecodeControl<'_>) -> Resu
     let (decoded, preview_stats) = rayon::join(
         || decode_front_end(path),
         || {
-            crate::raw_preview::cached_stats(path).or_else(|| {
-                std::fs::read(path)
-                    .ok()
-                    .and_then(|bytes| crate::raw_preview::preview_stats_from_bytes(&bytes))
-            })
+            crate::raw_preview::cached_stats(path)
+                // The preview worker is on this very file: take its stats.
+                .or_else(|| crate::raw_preview::stats_when_measured(path, PREVIEW_STATS_PATIENCE))
+                .or_else(|| {
+                    std::fs::read(path)
+                        .ok()
+                        .and_then(|bytes| crate::raw_preview::preview_stats_from_bytes(&bytes))
+                })
         },
     );
     let decoded = decoded?;
     if control.cancelled() {
         return Err(RAW_DECODE_CANCELLED.to_string());
     }
-    decode_raw_from(decoded, path, preview_stats, control)
+    clock.lap("read");
+    decode_raw_from(decoded, path, preview_stats, control, clock)
 }
 
 /// Where a channel's effective white level came from. The Q1 sensor-preprocessing
@@ -675,6 +746,7 @@ fn decode_raw_from(
     path: &Path,
     preview_stats: Option<crate::raw_preview::RawPreviewStats>,
     control: RawDecodeControl<'_>,
+    mut clock: StageClock,
 ) -> Result<Canvas, String> {
     macro_rules! cancel_point {
         () => {
@@ -857,12 +929,27 @@ fn decode_raw_from(
         as_shot_white,
         camera_name: camera_name.trim(),
     };
+    let recipe_name = raw_render_recipe.version.name();
+    // Decoded before (an earlier session, or earlier in this one): read the
+    // finished master back instead of demosaicing again.
+    if let Some(hit) = crate::raw_cache::lookup(path, recipe_name) {
+        let mut scene = raw_scene_shell(&tail, hit.width, hit.height, hit.half);
+        scene.camera_rgb_curve = hit.camera_rgb_curve;
+        let mut canvas = Canvas::from_rgba16(hit.px16, hit.width, hit.height);
+        canvas.develop_source = Some(std::sync::Arc::new(scene));
+        tag_raw_canvas(&mut canvas, &tail);
+        clock.lap("cache");
+        crate::raw_preview::forget_cached_mean_luma(path);
+        clock.report(hit.width as f64 * hit.height as f64 / 1e6);
+        return Ok(canvas);
+    }
 
     let crop_top = area.top;
     let crop_left = area.left;
     let cfa = &raw.cfa;
     let sensor_corrections = sensor_correction_plan(w, h, raw.cpp, cfa.is_valid(), mono);
     let mut out = vec![0u16; cw * ch * 4];
+    clock.lap("levels");
 
     match raw.cpp {
         // Bayer mosaic (or monochrome): build a normalized, white-balanced mono
@@ -894,76 +981,108 @@ fn decode_raw_from(
                 inpaint_opposed_bayer(&mut plane, w, h, cfa, gain);
             }
             let plane = plane;
+            clock.lap("mosaic");
             cancel_point!();
             if let (false, Some(sink)) = (mono, control.draft) {
                 if let Some(draft) = render_raw_draft(&plane, w, area, cfa, writer, &tail) {
                     sink(draft);
                 }
+                clock.lap("draft");
                 cancel_point!();
             }
 
-            // Whole-sensor AHD demosaic, computed once (skipped for mono and past
-            // the pixel cap). The per-pixel loop below just reads it back; a None
-            // here means the loop falls to Malvar/bilinear per pixel instead.
-            // The cap is overridable (`IAI_AHD_MAX_PIXELS`) so AHD's cleaner
+            // AHD demosaic (skipped for mono and past the pixel cap, where the
+            // per-pixel loop below falls to Malvar/bilinear instead). The cap
+            // is overridable (`IAI_AHD_MAX_PIXELS`) so AHD's cleaner
             // diagonal-edge handling can be used on full-frame RAW that would
             // otherwise fall back to Malvar (which zippers at high-contrast edges).
             let ahd_cap = env_usize("IAI_AHD_MAX_PIXELS", AHD_MAX_PIXELS);
-            let ahd_rgb: Option<Vec<[f32; 3]>> =
-                if DEMOSAIC == DemosaicMethod::Ahd && !mono && w.saturating_mul(h) <= ahd_cap {
-                    match demosaic_ahd(&plane, w, h, cfa, &cam2xyz, control.cancel) {
-                        Some(rgb) => Some(rgb),
-                        None => return Err(RAW_DECODE_CANCELLED.to_string()),
-                    }
-                } else {
-                    None
-                };
-
-            out.par_chunks_mut(cw * 4)
-                .enumerate()
-                .for_each(|(oy, row)| {
-                    let fr = oy + crop_top;
-                    for ox in 0..cw {
-                        let fc = ox + crop_left;
-                        let dst = ox * 4;
-                        if mono {
-                            let e = f32_to_f16_bits(plane[fr * w + fc]);
-                            row[dst] = e;
-                            row[dst + 1] = e;
-                            row[dst + 2] = e;
-                            row[dst + 3] = 0x3c00; // 1.0
-                            continue;
-                        }
-                        let cam = if let Some(ref rgb) = ahd_rgb {
-                            rgb[fr * w + fc]
-                        } else if DEMOSAIC == DemosaicMethod::Bilinear {
-                            // 3×3 per-colour average = bilinear interpolation of the
-                            // missing channels (edges clamp to the sensor bounds).
-                            let mut sum = [0.0f32; 3];
-                            let mut cnt = [0.0f32; 3];
-                            for dr in -1i32..=1 {
-                                for dc in -1i32..=1 {
-                                    let nr = (fr as i32 + dr).clamp(0, h as i32 - 1) as usize;
-                                    let nc = (fc as i32 + dc).clamp(0, w as i32 - 1) as usize;
-                                    let col = chroma_channel(cfa.color_at(nr, nc));
-                                    if col < 3 {
-                                        sum[col] += plane[nr * w + nc];
-                                        cnt[col] += 1.0;
+            if DEMOSAIC == DemosaicMethod::Ahd && !mono && w.saturating_mul(h) <= ahd_cap {
+                // Band by band, tile by tile: each worker keeps its working
+                // planes in cache and writes the scene pixels of its tile
+                // straight away.
+                out.par_chunks_mut(cw * 4 * AHD_BAND_ROWS)
+                    .enumerate()
+                    .for_each_init(
+                        || (AhdScratch::default(), Vec::<[f32; 3]>::new()),
+                        |(scratch, tile), (band, rows)| {
+                            if control.cancelled() {
+                                return;
+                            }
+                            let y0 = crop_top + band * AHD_BAND_ROWS;
+                            let y1 = y0 + rows.len() / (cw * 4);
+                            let x_end = crop_left + cw;
+                            let mut x0 = crop_left;
+                            while x0 < x_end {
+                                let x1 = (x0 + AHD_TILE_COLS).min(x_end);
+                                demosaic_ahd_tile(
+                                    &plane,
+                                    w,
+                                    h,
+                                    cfa,
+                                    &cam2xyz,
+                                    (x0, x1),
+                                    (y0, y1),
+                                    scratch,
+                                    tile,
+                                );
+                                for (ty, cams) in tile.chunks_exact(x1 - x0).enumerate() {
+                                    let row = &mut rows[ty * cw * 4..][..cw * 4];
+                                    for (tx, cam) in cams.iter().enumerate() {
+                                        let dst = (x0 - crop_left + tx) * 4;
+                                        writer.write(&mut row[dst..dst + 4], *cam);
                                     }
                                 }
+                                x0 = x1;
                             }
-                            [
-                                sum[0] / cnt[0].max(1.0),
-                                sum[1] / cnt[1].max(1.0),
-                                sum[2] / cnt[2].max(1.0),
-                            ]
-                        } else {
-                            // Malvar, or AHD that fell back past the pixel cap.
-                            demosaic_malvar(&plane, w, h, cfa, fr, fc)
-                        };
-                        writer.write(&mut row[dst..dst + 4], cam);
-                    }
-                });
+                        },
+                    );
+                cancel_point!();
+            } else {
+                out.par_chunks_mut(cw * 4)
+                    .enumerate()
+                    .for_each(|(oy, row)| {
+                        let fr = oy + crop_top;
+                        for ox in 0..cw {
+                            let fc = ox + crop_left;
+                            let dst = ox * 4;
+                            if mono {
+                                let e = f32_to_f16_bits(plane[fr * w + fc]);
+                                row[dst] = e;
+                                row[dst + 1] = e;
+                                row[dst + 2] = e;
+                                row[dst + 3] = 0x3c00; // 1.0
+                                continue;
+                            }
+                            let cam = if DEMOSAIC == DemosaicMethod::Bilinear {
+                                // 3×3 per-colour average = bilinear interpolation of the
+                                // missing channels (edges clamp to the sensor bounds).
+                                let mut sum = [0.0f32; 3];
+                                let mut cnt = [0.0f32; 3];
+                                for dr in -1i32..=1 {
+                                    for dc in -1i32..=1 {
+                                        let nr = (fr as i32 + dr).clamp(0, h as i32 - 1) as usize;
+                                        let nc = (fc as i32 + dc).clamp(0, w as i32 - 1) as usize;
+                                        let col = chroma_channel(cfa.color_at(nr, nc));
+                                        if col < 3 {
+                                            sum[col] += plane[nr * w + nc];
+                                            cnt[col] += 1.0;
+                                        }
+                                    }
+                                }
+                                [
+                                    sum[0] / cnt[0].max(1.0),
+                                    sum[1] / cnt[1].max(1.0),
+                                    sum[2] / cnt[2].max(1.0),
+                                ]
+                            } else {
+                                // Malvar, or AHD that fell back past the pixel cap.
+                                demosaic_malvar(&plane, w, h, cfa, fr, fc)
+                            };
+                            writer.write(&mut row[dst..dst + 4], cam);
+                        }
+                    });
+            }
         }
         // Already demosaiced RGB (e.g. linear DNG) — still in camera colour space.
         3 => {
@@ -996,6 +1115,7 @@ fn decode_raw_from(
         }
         other => return Err(format!("RAW {other} kênh/điểm ảnh chưa hỗ trợ")),
     }
+    clock.lap("demosaic");
     cancel_point!();
 
     // Default false-colour suppression on the linear scene: a chroma median that
@@ -1007,6 +1127,7 @@ fn decode_raw_from(
     if !mono && fc_iters > 0 {
         suppress_false_color(&mut out, cw, ch, fc_iters);
     }
+    clock.lap("false colour");
     cancel_point!();
 
     // Default colour-noise reduction on the linear scene, before capture sharpen
@@ -1016,6 +1137,7 @@ fn decode_raw_from(
     if !mono && scene_color_nr > 1e-4 {
         denoise_scene_chroma(&mut out, cw, ch, scene_color_nr);
     }
+    clock.lap("colour nr");
     cancel_point!();
 
     // Capture sharpening on the linear scene, after demosaic and before the
@@ -1037,10 +1159,13 @@ fn decode_raw_from(
             cs_edge,
         );
     }
+    clock.lap("sharpen");
     cancel_point!();
 
-    let canvas = finish_raw_scene(out, cw, ch, &tail, true, control)?;
+    let canvas = finish_raw_scene(out, cw, ch, &tail, true, control, Some(&mut clock))?;
+    crate::raw_cache::store(path, &canvas, recipe_name);
     crate::raw_preview::forget_cached_mean_luma(path);
+    clock.report(cw as f64 * ch as f64 / 1e6);
     Ok(canvas)
 }
 
@@ -1066,34 +1191,21 @@ fn finish_raw_scene(
     tail: &RawSceneTail<'_>,
     keep_scene: bool,
     control: RawDecodeControl<'_>,
+    mut clock: Option<&mut StageClock>,
 ) -> Result<Canvas, String> {
+    let mut lap = |stage: &'static str| {
+        if let Some(clock) = clock.as_deref_mut() {
+            clock.lap(stage);
+        }
+    };
     // Apply EXIF orientation so portraits aren't sideways. The buffer holds f16
     // bits at this point; orientation only moves 4-u16 pixels, so it is agnostic.
     let (out, fw, fh) = apply_orientation(out, cw, ch, tail.orientation);
+    lap("orient");
     let jpeg_match = tail.jpeg_match;
     let raw_render_recipe = tail.recipe;
 
-    let mut scene = SceneSource {
-        width: fw as u32,
-        height: fh as u32,
-        half: out,
-        alpha: None,
-        look: iai_develop::develop_scene::BaseLook::Raw,
-        color_pipeline: iai_color::working_color::ColorPipelineMetadata::default(),
-        camera_profile: Some(RawSceneCharacterization {
-            resolution: tail.resolution.clone(),
-            jpeg_match: JpegMatchMode::from_stages(
-                jpeg_match.apply_gain,
-                jpeg_match.apply_matrix,
-                jpeg_match.apply_curves,
-                jpeg_match.preview_safe,
-                jpeg_match.preview_tone,
-            ),
-            raw_render_recipe: raw_render_recipe.version,
-        }),
-        as_shot_white_balance: tail.as_shot_white,
-        camera_rgb_curve: None,
-    };
+    let mut scene = raw_scene_shell(tail, fw as u32, fh as u32, out);
     if let Some(target) = tail.preview_stats {
         if jpeg_match.apply_gain {
             let gain =
@@ -1187,21 +1299,61 @@ fn finish_raw_scene(
         warm_scene(&mut scene.half, raw_render_recipe.scene_warm);
     }
 
+    lap("camera match");
     if control.cancelled() {
         return Err(RAW_DECODE_CANCELLED.to_string());
     }
 
     // The unclamped linear master + its neutral default-look render.
     let px16 = render_default_look(&scene);
+    lap("default look");
     if control.cancelled() {
         return Err(RAW_DECODE_CANCELLED.to_string());
     }
 
     let mut canvas = Canvas::from_rgba16(px16, fw as u32, fh as u32);
+    lap("tiles");
     if keep_scene {
         canvas.develop_source = Some(std::sync::Arc::new(scene));
     }
-    // The rendered pixels are sRGB — tag the document accordingly.
+    tag_raw_canvas(&mut canvas, tail);
+    Ok(canvas)
+}
+
+/// The scene master around `half` with the per-file colour constants of
+/// `tail` (the camera-JPEG RGB curve, fitted from the pixels, is left out).
+fn raw_scene_shell(
+    tail: &RawSceneTail<'_>,
+    width: u32,
+    height: u32,
+    half: Vec<u16>,
+) -> SceneSource {
+    let jpeg_match = tail.jpeg_match;
+    SceneSource {
+        width,
+        height,
+        half,
+        alpha: None,
+        look: iai_develop::develop_scene::BaseLook::Raw,
+        color_pipeline: iai_color::working_color::ColorPipelineMetadata::default(),
+        camera_profile: Some(RawSceneCharacterization {
+            resolution: tail.resolution.clone(),
+            jpeg_match: JpegMatchMode::from_stages(
+                jpeg_match.apply_gain,
+                jpeg_match.apply_matrix,
+                jpeg_match.apply_curves,
+                jpeg_match.preview_safe,
+                jpeg_match.preview_tone,
+            ),
+            raw_render_recipe: tail.recipe.version,
+        }),
+        as_shot_white_balance: tail.as_shot_white,
+        camera_rgb_curve: None,
+    }
+}
+
+/// Tag a RAW render as sRGB pixels from this camera and recipe.
+fn tag_raw_canvas(canvas: &mut Canvas, tail: &RawSceneTail<'_>) {
     canvas.icc_profile = iai_canvas::canvas::IccProfile {
         name: iai_color::cms::WorkingProfile::Srgb.name().to_string(),
         data: iai_color::cms::srgb_icc_bytes(),
@@ -1210,8 +1362,7 @@ fn finish_raw_scene(
     canvas.metadata.develop_working_space =
         iai_color::working_color::WorkingColorSpace::LinearProPhoto;
     canvas.metadata.color_pipeline_version = 2;
-    canvas.metadata.raw_render_recipe = Some(raw_render_recipe.version);
-    Ok(canvas)
+    canvas.metadata.raw_render_recipe = Some(tail.recipe.version);
 }
 
 /// Longest edge of the draft render: fills a Develop view at Fit on a large
@@ -1297,7 +1448,9 @@ fn render_raw_draft(
                 writer.write(&mut row[dx * 4..dx * 4 + 4], cam);
             }
         });
-    finish_raw_scene(out, dw, dh, tail, false, RawDecodeControl::default()).ok()
+    // The draft keeps its scene master: Develop edits it until the full decode
+    // lands.
+    finish_raw_scene(out, dw, dh, tail, true, RawDecodeControl::default(), None).ok()
 }
 
 /// Demosaic algorithm for Bayer sensors.
@@ -1390,6 +1543,7 @@ fn demosaic_malvar(plane: &[f32], w: usize, h: usize, cfa: &Cfa, r: usize, c: us
 }
 
 /// Edge-clamped flat index into a `w×h` sensor plane.
+#[cfg(test)]
 #[inline]
 fn ahd_idx(w: usize, h: usize, r: i32, c: i32) -> usize {
     let rr = r.clamp(0, h as i32 - 1) as usize;
@@ -1415,6 +1569,7 @@ const AHD_GREEN_SLACK: f32 = 0.05;
 /// at ±2, and hold the result near its two green neighbours (see
 /// [`AHD_GREEN_SLACK`]). Green sites keep their measured value. `horizontal`
 /// selects the axis.
+#[cfg(test)]
 fn ahd_green(plane: &[f32], w: usize, h: usize, cfa: &Cfa, horizontal: bool) -> Vec<f32> {
     (0..w * h)
         .into_par_iter()
@@ -1480,6 +1635,7 @@ fn ahd_diff_share(green_here: f32, green_there: f32) -> f32 {
 /// the opposite colour from the four diagonals. A far brighter neighbour lends
 /// only part of its difference (see [`ahd_diff_share`]). The known channel stays
 /// measured.
+#[cfg(test)]
 fn ahd_reconstruct(plane: &[f32], green: &[f32], w: usize, h: usize, cfa: &Cfa) -> Vec<[f32; 3]> {
     (0..w * h)
         .into_par_iter()
@@ -1538,10 +1694,10 @@ fn cam_to_lab(cam: [f32; 3], m: &[[f32; 4]; 3]) -> [f32; 3] {
     [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
 }
 
-/// Adaptive Homogeneity-Directed demosaic (see [`DemosaicMethod::Ahd`]). Returns
-/// full camera RGB over the whole sensor, or `None` once `cancel` is raised
-/// (checked between passes). Transient memory is ~50 bytes/px, so the caller
-/// gates this by [`AHD_MAX_PIXELS`].
+/// Adaptive Homogeneity-Directed demosaic (see [`DemosaicMethod::Ahd`]) over
+/// the whole sensor in whole-frame passes: the reference [`demosaic_ahd_tile`]
+/// is held to, bit for bit. Returns `None` once `cancel` is raised.
+#[cfg(test)]
 fn demosaic_ahd(
     plane: &[f32],
     w: usize,
@@ -1649,6 +1805,279 @@ fn demosaic_ahd(
         })
         .collect();
     Some(rgb)
+}
+
+/// Rows per band and columns per tile of the AHD demosaic: small enough that
+/// one tile's working planes (about half a megabyte) stay in a core's cache.
+const AHD_BAND_ROWS: usize = 32;
+const AHD_TILE_COLS: usize = 256;
+
+/// One worker's working planes for [`demosaic_ahd_tile`], reused tile to tile.
+#[derive(Default)]
+struct AhdScratch {
+    green_h: Vec<f32>,
+    green_v: Vec<f32>,
+    rgb_h: Vec<[f32; 3]>,
+    rgb_v: Vec<[f32; 3]>,
+    lab_h: Vec<[f32; 3]>,
+    lab_v: Vec<[f32; 3]>,
+    homo: Vec<[u8; 2]>,
+}
+
+/// A rectangle of sensor rows and columns: the window one working plane of a
+/// tile covers.
+#[derive(Clone, Copy)]
+struct AhdWindow {
+    x0: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+}
+
+impl AhdWindow {
+    /// The tile grown by `margin` on every side, kept inside the sensor.
+    fn around(x: (usize, usize), y: (usize, usize), margin: usize, w: usize, h: usize) -> Self {
+        Self {
+            x0: x.0.saturating_sub(margin),
+            x1: (x.1 + margin).min(w),
+            y0: y.0.saturating_sub(margin),
+            y1: (y.1 + margin).min(h),
+        }
+    }
+
+    fn width(&self) -> usize {
+        self.x1 - self.x0
+    }
+
+    #[inline]
+    fn at(&self, r: usize, c: usize) -> usize {
+        (r - self.y0) * self.width() + (c - self.x0)
+    }
+}
+
+/// Full camera RGB of one directional green plane over `colour`: colour
+/// DIFFERENCES (X − G), which are smooth across edges, interpolated from the
+/// neighbours; green sites take R and B from their horizontal vs vertical
+/// pairs, red/blue sites the opposite colour from the four diagonals. A far
+/// brighter neighbour lends only part of its difference ([`ahd_diff_share`]).
+/// The known channel stays measured.
+#[allow(clippy::too_many_arguments)]
+fn ahd_reconstruct_window(
+    plane: &[f32],
+    w: usize,
+    h: usize,
+    cfa: &Cfa,
+    green: &[f32],
+    greens: AhdWindow,
+    colour: AhdWindow,
+    out: &mut Vec<[f32; 3]>,
+) {
+    let row = |r: i32| r.clamp(0, h as i32 - 1) as usize;
+    let col = |c: i32| c.clamp(0, w as i32 - 1) as usize;
+    out.clear();
+    for r in colour.y0..colour.y1 {
+        for c in colour.x0..colour.x1 {
+            let (ri, ci) = (r as i32, c as i32);
+            let g = green[greens.at(r, c)];
+            let lent = |rr: usize, cc: usize| {
+                let there = green[greens.at(rr, cc)];
+                (plane[rr * w + cc] - there) * ahd_diff_share(g, there)
+            };
+            out.push(match cfa.color_at(r, c) {
+                1 => {
+                    let horiz = g + 0.5 * (lent(r, col(ci - 1)) + lent(r, col(ci + 1)));
+                    let vert = g + 0.5 * (lent(row(ri - 1), c) + lent(row(ri + 1), c));
+                    // The horizontal neighbours carry one colour, the vertical the other.
+                    if cfa.color_at(r, c + 1) == 0 {
+                        [horiz.max(0.0), g, vert.max(0.0)]
+                    } else {
+                        [vert.max(0.0), g, horiz.max(0.0)]
+                    }
+                }
+                site => {
+                    let mut sum = 0.0;
+                    for (dr, dc) in [(-1i32, -1i32), (-1, 1), (1, -1), (1, 1)] {
+                        sum += lent(row(ri + dr), col(ci + dc));
+                    }
+                    let opp = (g + sum * 0.25).max(0.0);
+                    if site == 0 {
+                        [plane[r * w + c], g, opp] // red site: R measured, B interpolated
+                    } else {
+                        [opp, g, plane[r * w + c]] // blue site: B measured, R interpolated
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// Adaptive Homogeneity-Directed demosaic (see [`DemosaicMethod::Ahd`]) of
+/// sensor columns `x.0..x.1`, rows `y.0..y.1`, into `out` (row-major). Each
+/// step covers only the margin the next one reads: directional green three
+/// pixels out, the two colour candidates and their CIELab two, the
+/// homogeneity counts one.
+#[allow(clippy::too_many_arguments)]
+fn demosaic_ahd_tile(
+    plane: &[f32],
+    w: usize,
+    h: usize,
+    cfa: &Cfa,
+    cam2xyz: &[[f32; 4]; 3],
+    x: (usize, usize),
+    y: (usize, usize),
+    scratch: &mut AhdScratch,
+    out: &mut Vec<[f32; 3]>,
+) {
+    let row = |r: i32| r.clamp(0, h as i32 - 1) as usize;
+    let col = |c: i32| c.clamp(0, w as i32 - 1) as usize;
+    let greens = AhdWindow::around(x, y, 3, w, h);
+    let colour = AhdWindow::around(x, y, 2, w, h);
+    let counts = AhdWindow::around(x, y, 1, w, h);
+
+    // (1) Hamilton-Adams directional green: at each red/blue site, green
+    // along one axis, the neighbour average corrected with the same-colour
+    // Laplacian at ±2 and held near its two green neighbours (see
+    // [`AHD_GREEN_SLACK`]). Green sites keep their measured value.
+    scratch.green_h.clear();
+    scratch.green_v.clear();
+    for r in greens.y0..greens.y1 {
+        for c in greens.x0..greens.x1 {
+            let center = plane[r * w + c];
+            if cfa.color_at(r, c) == 1 {
+                scratch.green_h.push(center);
+                scratch.green_v.push(center);
+                continue;
+            }
+            let (ri, ci) = (r as i32, c as i32);
+            let estimate = |a: f32, b: f32, far1: f32, far2: f32| {
+                let estimate = (a + b) * 0.5 + (2.0 * center - far1 - far2) * 0.25;
+                // The slack is a share of each bound, not of the mean: beside a
+                // bright neighbour a share of the mean would dwarf the dark one.
+                // `max` then `min`, not `clamp`: a NaN sample must not panic here.
+                estimate
+                    .max(a.min(b) * (1.0 - AHD_GREEN_SLACK))
+                    .min(a.max(b) * (1.0 + AHD_GREEN_SLACK))
+                    .max(0.0)
+            };
+            scratch.green_h.push(estimate(
+                plane[r * w + col(ci - 1)],
+                plane[r * w + col(ci + 1)],
+                plane[r * w + col(ci - 2)],
+                plane[r * w + col(ci + 2)],
+            ));
+            scratch.green_v.push(estimate(
+                plane[row(ri - 1) * w + c],
+                plane[row(ri + 1) * w + c],
+                plane[row(ri - 2) * w + c],
+                plane[row(ri + 2) * w + c],
+            ));
+        }
+    }
+
+    // (2) Full RGB candidate per direction, (3) its CIELab for the
+    // homogeneity metric.
+    ahd_reconstruct_window(
+        plane,
+        w,
+        h,
+        cfa,
+        &scratch.green_h,
+        greens,
+        colour,
+        &mut scratch.rgb_h,
+    );
+    ahd_reconstruct_window(
+        plane,
+        w,
+        h,
+        cfa,
+        &scratch.green_v,
+        greens,
+        colour,
+        &mut scratch.rgb_v,
+    );
+    scratch.lab_h.clear();
+    scratch
+        .lab_h
+        .extend(scratch.rgb_h.iter().map(|&p| cam_to_lab(p, cam2xyz)));
+    scratch.lab_v.clear();
+    scratch
+        .lab_v
+        .extend(scratch.rgb_v.iter().map(|&p| cam_to_lab(p, cam2xyz)));
+
+    // (4) Per-pixel homogeneity count in each direction, using dcraw's adaptive Lab
+    // thresholds: the tighter of the two directions' local luminance/chroma gradients.
+    let (lab_h, lab_v) = (&scratch.lab_h, &scratch.lab_v);
+    scratch.homo.clear();
+    for r in counts.y0..counts.y1 {
+        for c in counts.x0..counts.x1 {
+            let (ri, ci) = (r as i32, c as i32);
+            let i = colour.at(r, c);
+            // up, down, left, right
+            let nb = [
+                colour.at(row(ri - 1), c),
+                colour.at(row(ri + 1), c),
+                colour.at(r, col(ci - 1)),
+                colour.at(r, col(ci + 1)),
+            ];
+            let mut ld_h = [0.0f32; 4];
+            let mut cd_h = [0.0f32; 4];
+            let mut ld_v = [0.0f32; 4];
+            let mut cd_v = [0.0f32; 4];
+            for k in 0..4 {
+                let j = nb[k];
+                ld_h[k] = (lab_h[i][0] - lab_h[j][0]).abs();
+                cd_h[k] = (lab_h[i][1] - lab_h[j][1]).powi(2) + (lab_h[i][2] - lab_h[j][2]).powi(2);
+                ld_v[k] = (lab_v[i][0] - lab_v[j][0]).abs();
+                cd_v[k] = (lab_v[i][1] - lab_v[j][1]).powi(2) + (lab_v[i][2] - lab_v[j][2]).powi(2);
+            }
+            // Horizontal image → horizontal gradient (left,right = 2,3); vertical
+            // image → vertical gradient (up,down = 0,1).
+            let leps = ld_h[2].max(ld_h[3]).min(ld_v[0].max(ld_v[1]));
+            let ceps = cd_h[2].max(cd_h[3]).min(cd_v[0].max(cd_v[1]));
+            let mut hh = 0u8;
+            let mut hv = 0u8;
+            for k in 0..4 {
+                if ld_h[k] <= leps && cd_h[k] <= ceps {
+                    hh += 1;
+                }
+                if ld_v[k] <= leps && cd_v[k] <= ceps {
+                    hv += 1;
+                }
+            }
+            scratch.homo.push([hh, hv]);
+        }
+    }
+
+    // (5) Pick, per pixel, the direction more homogeneous over a 3×3 window; tie →
+    // average both candidates.
+    out.clear();
+    for r in y.0..y.1 {
+        for c in x.0..x.1 {
+            let (ri, ci) = (r as i32, c as i32);
+            let (mut sh, mut sv) = (0u32, 0u32);
+            for dr in -1..=1 {
+                for dc in -1..=1 {
+                    let homo = scratch.homo[counts.at(row(ri + dr), col(ci + dc))];
+                    sh += homo[0] as u32;
+                    sv += homo[1] as u32;
+                }
+            }
+            let i = colour.at(r, c);
+            let (rgb_h, rgb_v) = (scratch.rgb_h[i], scratch.rgb_v[i]);
+            out.push(if sh > sv {
+                rgb_h
+            } else if sv > sh {
+                rgb_v
+            } else {
+                [
+                    (rgb_h[0] + rgb_v[0]) * 0.5,
+                    (rgb_h[1] + rgb_v[1]) * 0.5,
+                    (rgb_h[2] + rgb_v[2]) * 0.5,
+                ]
+            });
+        }
+    }
 }
 
 // Highlight reconstruction — "inpaint opposed". A blown sensor channel clips at
@@ -2608,7 +3037,8 @@ fn tone_lut_lerp(lut: &[f32], t01: f32) -> f32 {
         return 0.0;
     }
     let pos = t01.clamp(0.0, 1.0) * (n - 1) as f32;
-    let i = pos.floor() as usize;
+    // Not negative, so truncating is the floor (and no libm call).
+    let i = pos as usize;
     if i + 1 >= n {
         return lut[n - 1];
     }
@@ -2996,108 +3426,163 @@ fn chroma_nr_link(a: f32, b: f32) -> u8 {
     (255.0 / (1.0 + apart * apart) + 0.5) as u8
 }
 
-/// The links of one à-trous level: from each pixel to the one `hole` and
-/// `2 * hole` to its right (`right`) and below it (`below`); 0 past the frame.
-struct ChromaNrLinks {
-    right: [Vec<u8>; 2],
-    below: [Vec<u8>; 2],
-}
+/// Rows per band of the colour NR's smoothing passes. Each band also smooths
+/// `2 * hole` rows above and below it horizontally, for its vertical taps.
+const CHROMA_NR_BAND_ROWS: usize = 32;
+/// Columns per tile of a band: a tile's scratch (horizontal result plus its
+/// links) stays in the core's own cache.
+const CHROMA_NR_TILE_COLS: usize = 256;
 
-fn chroma_nr_links(luma: &[f32], w: usize, h: usize, level: usize) -> ChromaNrLinks {
-    let hole = 1usize << level;
-    let towards = |dx: usize, dy: usize| -> Vec<u8> {
-        let mut links = vec![0u8; w * h];
-        links.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-            if y + dy >= h {
-                return;
-            }
-            let here = &luma[y * w..][..w];
-            let there = &luma[(y + dy) * w..][..w];
-            for (x, slot) in row.iter_mut().enumerate().take(w.saturating_sub(dx)) {
-                *slot = chroma_nr_link(here[x], there[x + dx]);
-            }
-        });
-        links
-    };
-    ChromaNrLinks {
-        right: [towards(hole, 0), towards(2 * hole, 0)],
-        below: [towards(0, hole), towards(0, 2 * hole)],
-    }
-}
-
-/// One separable à-trous B3-spline smoothing pass at hole spacing `1 << level`,
-/// each tap weighted by its link to the pixel being smoothed; taps past the
-/// frame are left out. Parallel over rows.
-fn atrous_smooth_linked(
-    src: &[f32],
+/// One separable à-trous B3-spline smoothing level at hole spacing
+/// `1 << level` over all three chroma planes at once, each tap weighted by
+/// [`chroma_nr_link`] to the pixel being smoothed; taps past the frame are left
+/// out. Writes the smoothed planes to `next` and subtracts `k` of the detail it
+/// removed from `plane`.
+///
+/// Works band by band, tile by tile, with the links worked out per tile from
+/// `luma`: no frame-sized link or half-way buffer. Same arithmetic, in the same
+/// order, as smoothing the whole frame one plane and one direction at a time.
+#[allow(clippy::too_many_arguments)]
+fn atrous_level_linked(
+    prev: &[[f32; 3]],
+    luma: &[f32],
+    next: &mut [[f32; 3]],
+    plane: &mut [[f32; 3]],
     w: usize,
     h: usize,
     level: usize,
-    links: &ChromaNrLinks,
-) -> Vec<f32> {
+    k: f32,
+) {
     // B3 = [1, 4, 6, 4, 1] / 16 and links run to 255; both scales cancel in the
     // normalisation.
     const CENTRE: f32 = 6.0 * 255.0;
     const NEAR: f32 = 4.0;
     const FAR: f32 = 1.0;
     let hole = 1usize << level;
-    let mut tmp = vec![0.0f32; w * h];
-    tmp.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
-        let row = &src[y * w..][..w];
-        let near = &links.right[0][y * w..][..w];
-        let far = &links.right[1][y * w..][..w];
-        for (x, slot) in out.iter_mut().enumerate() {
-            let mut acc = CENTRE * row[x];
-            let mut norm = CENTRE;
-            let mut tap = |at: usize, weight: f32| {
-                acc += weight * row[at];
-                norm += weight;
-            };
-            if x >= hole {
-                tap(x - hole, NEAR * near[x - hole] as f32);
+    let halo = 2 * hole;
+    let band_len = w * CHROMA_NR_BAND_ROWS;
+    next.par_chunks_mut(band_len)
+        .zip(plane.par_chunks_mut(band_len))
+        .enumerate()
+        .for_each(|(band, (next_band, plane_band))| {
+            let y0 = band * CHROMA_NR_BAND_ROWS;
+            let y1 = y0 + next_band.len() / w;
+            let t0 = y0.saturating_sub(halo);
+            let t1 = (y1 + halo).min(h);
+            let cols = CHROMA_NR_TILE_COLS.min(w);
+            let reach = cols + halo;
+            let mut tmp = vec![[0.0f32; 3]; (t1 - t0) * cols];
+            let mut right_near = vec![0u8; reach];
+            let mut right_far = vec![0u8; reach];
+            let mut below_near = vec![0u8; (y1 - t0) * cols];
+            let mut below_far = vec![0u8; (y1 - t0) * cols];
+            let mut x0 = 0;
+            while x0 < w {
+                let x1 = (x0 + cols).min(w);
+                let tw = x1 - x0;
+                // Horizontal: rows t0..t1, columns x0..x1.
+                let lx0 = x0.saturating_sub(halo);
+                for y in t0..t1 {
+                    let row = &prev[y * w..][..w];
+                    let lrow = &luma[y * w..][..w];
+                    for j in lx0..x1 {
+                        right_near[j - lx0] = if j + hole < w {
+                            chroma_nr_link(lrow[j], lrow[j + hole])
+                        } else {
+                            0
+                        };
+                        right_far[j - lx0] = if j + 2 * hole < w {
+                            chroma_nr_link(lrow[j], lrow[j + 2 * hole])
+                        } else {
+                            0
+                        };
+                    }
+                    let out = &mut tmp[(y - t0) * tw..][..tw];
+                    for (x, slot) in (x0..x1).zip(out.iter_mut()) {
+                        let mut acc = [CENTRE * row[x][0], CENTRE * row[x][1], CENTRE * row[x][2]];
+                        let mut norm = CENTRE;
+                        let mut tap = |at: usize, weight: f32| {
+                            for (a, &v) in acc.iter_mut().zip(&row[at]) {
+                                *a += weight * v;
+                            }
+                            norm += weight;
+                        };
+                        if x >= hole {
+                            tap(x - hole, NEAR * right_near[x - hole - lx0] as f32);
+                        }
+                        if x >= 2 * hole {
+                            tap(x - 2 * hole, FAR * right_far[x - 2 * hole - lx0] as f32);
+                        }
+                        if x + hole < w {
+                            tap(x + hole, NEAR * right_near[x - lx0] as f32);
+                        }
+                        if x + 2 * hole < w {
+                            tap(x + 2 * hole, FAR * right_far[x - lx0] as f32);
+                        }
+                        *slot = [acc[0] / norm, acc[1] / norm, acc[2] / norm];
+                    }
+                }
+                // Links to the pixels below, for rows t0..y1.
+                for y in t0..y1 {
+                    let here = &luma[y * w..][..w];
+                    let near = &mut below_near[(y - t0) * tw..][..tw];
+                    let far = &mut below_far[(y - t0) * tw..][..tw];
+                    for (j, x) in (x0..x1).enumerate() {
+                        near[j] = if y + hole < h {
+                            chroma_nr_link(here[x], luma[(y + hole) * w + x])
+                        } else {
+                            0
+                        };
+                        far[j] = if y + 2 * hole < h {
+                            chroma_nr_link(here[x], luma[(y + 2 * hole) * w + x])
+                        } else {
+                            0
+                        };
+                    }
+                }
+                // Vertical: rows y0..y1, then take the removed detail off `plane`.
+                for y in y0..y1 {
+                    let r = y - t0;
+                    for (j, x) in (x0..x1).enumerate() {
+                        let ti = r * tw + j;
+                        let mut acc = [
+                            CENTRE * tmp[ti][0],
+                            CENTRE * tmp[ti][1],
+                            CENTRE * tmp[ti][2],
+                        ];
+                        let mut norm = CENTRE;
+                        let mut tap = |at: usize, weight: f32| {
+                            for (a, &v) in acc.iter_mut().zip(&tmp[at]) {
+                                *a += weight * v;
+                            }
+                            norm += weight;
+                        };
+                        if y >= hole {
+                            let up = ti - hole * tw;
+                            tap(up, NEAR * below_near[up] as f32);
+                        }
+                        if y >= 2 * hole {
+                            let up = ti - 2 * hole * tw;
+                            tap(up, FAR * below_far[up] as f32);
+                        }
+                        if y + hole < h {
+                            tap(ti + hole * tw, NEAR * below_near[ti] as f32);
+                        }
+                        if y + 2 * hole < h {
+                            tap(ti + 2 * hole * tw, FAR * below_far[ti] as f32);
+                        }
+                        let smooth = [acc[0] / norm, acc[1] / norm, acc[2] / norm];
+                        let at = (y - y0) * w + x;
+                        let p = prev[y * w + x];
+                        for c in 0..3 {
+                            plane_band[at][c] -= k * (p[c] - smooth[c]);
+                        }
+                        next_band[at] = smooth;
+                    }
+                }
+                x0 = x1;
             }
-            if x >= 2 * hole {
-                tap(x - 2 * hole, FAR * far[x - 2 * hole] as f32);
-            }
-            if x + hole < w {
-                tap(x + hole, NEAR * near[x] as f32);
-            }
-            if x + 2 * hole < w {
-                tap(x + 2 * hole, FAR * far[x] as f32);
-            }
-            *slot = acc / norm;
-        }
-    });
-    let (near, far) = (&links.below[0], &links.below[1]);
-    let tmp = &tmp;
-    let mut dst = vec![0.0f32; w * h];
-    dst.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
-        for (x, slot) in out.iter_mut().enumerate() {
-            let i = y * w + x;
-            let mut acc = CENTRE * tmp[i];
-            let mut norm = CENTRE;
-            let mut tap = |at: usize, weight: f32| {
-                acc += weight * tmp[at];
-                norm += weight;
-            };
-            if y >= hole {
-                let up = i - hole * w;
-                tap(up, NEAR * near[up] as f32);
-            }
-            if y >= 2 * hole {
-                let up = i - 2 * hole * w;
-                tap(up, FAR * far[up] as f32);
-            }
-            if y + hole < h {
-                tap(i + hole * w, NEAR * near[i] as f32);
-            }
-            if y + 2 * hole < h {
-                tap(i + 2 * hole * w, FAR * far[i] as f32);
-            }
-            *slot = acc / norm;
-        }
-    });
-    dst
+        });
 }
 
 /// Whole-frame colour-noise reduction on the linear RGBA-f16 scene master. Splits
@@ -3112,58 +3597,50 @@ fn denoise_scene_chroma(scene: &mut [u16], w: usize, h: usize, strength: f32) {
     }
     const LW: [f32; 3] = [0.22, 0.69, 0.09];
     let n = w * h;
-    // Decode once into luma + three chroma planes.
+    // Decode once into luma + the three chroma offsets.
     let mut luma = vec![0.0f32; n];
-    let mut chroma = [vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]];
-    {
-        let [c0, c1, c2] = &mut chroma;
-        luma.par_chunks_mut(w)
-            .zip(c0.par_chunks_mut(w))
-            .zip(c1.par_chunks_mut(w).zip(c2.par_chunks_mut(w)))
-            .zip(scene.par_chunks(w * 4))
-            .for_each(|(((l, c0), (c1, c2)), src)| {
-                for x in 0..w {
-                    let rgb = [
-                        f16_bits_to_f32(src[x * 4]),
-                        f16_bits_to_f32(src[x * 4 + 1]),
-                        f16_bits_to_f32(src[x * 4 + 2]),
-                    ];
-                    let y = LW[0] * rgb[0] + LW[1] * rgb[1] + LW[2] * rgb[2];
-                    l[x] = y;
-                    c0[x] = rgb[0] - y;
-                    c1[x] = rgb[1] - y;
-                    c2[x] = rgb[2] - y;
-                }
-            });
+    let mut plane = vec![[0.0f32; 3]; n];
+    luma.par_chunks_mut(w)
+        .zip(plane.par_chunks_mut(w))
+        .zip(scene.par_chunks(w * 4))
+        .for_each(|((l, c), src)| {
+            for x in 0..w {
+                let rgb = [
+                    f16_bits_to_f32(src[x * 4]),
+                    f16_bits_to_f32(src[x * 4 + 1]),
+                    f16_bits_to_f32(src[x * 4 + 2]),
+                ];
+                let y = LW[0] * rgb[0] + LW[1] * rgb[1] + LW[2] * rgb[2];
+                l[x] = y;
+                c[x] = [rgb[0] - y, rgb[1] - y, rgb[2] - y];
+            }
+        });
+    // Each level smooths the previous level's result and takes the attenuated
+    // detail it removed off `plane`.
+    let mut prev = plane.clone();
+    let mut next = vec![[0.0f32; 3]; n];
+    for (level, &atten) in SCENE_CHROMA_NR_ATTEN.iter().enumerate() {
+        atrous_level_linked(
+            &prev,
+            &luma,
+            &mut next,
+            &mut plane,
+            w,
+            h,
+            level,
+            strength * atten,
+        );
+        std::mem::swap(&mut prev, &mut next);
     }
-    let links: Vec<ChromaNrLinks> = (0..SCENE_CHROMA_NR_ATTEN.len())
-        .map(|level| chroma_nr_links(&luma, w, h, level))
-        .collect();
-    // À-trous shrink each chroma plane in place: subtract the attenuated fine
-    // detail of each level (memory-light: only prev/next/accumulator live).
-    for plane in chroma.iter_mut() {
-        let mut prev = plane.clone();
-        for (level, (&atten, links)) in SCENE_CHROMA_NR_ATTEN.iter().zip(&links).enumerate() {
-            let next = atrous_smooth_linked(&prev, w, h, level, links);
-            let k = strength * atten;
-            plane
-                .par_iter_mut()
-                .zip(prev.par_iter())
-                .zip(next.par_iter())
-                .for_each(|((v, &p), &nx)| *v -= k * (p - nx));
-            prev = next;
-        }
-    }
+    drop((prev, next));
     // Recompose luma + denoised chroma back into the scene master.
     scene
         .par_chunks_mut(w * 4)
-        .enumerate()
-        .for_each(|(y, row)| {
+        .zip(luma.par_chunks(w).zip(plane.par_chunks(w)))
+        .for_each(|(row, (l, c))| {
             for x in 0..w {
-                let i = y * w + x;
-                let l = luma[i];
                 for ch in 0..3 {
-                    row[x * 4 + ch] = f32_to_f16_bits((l + chroma[ch][i]).max(0.0));
+                    row[x * 4 + ch] = f32_to_f16_bits((l[x] + c[x][ch]).max(0.0));
                 }
             }
         });
@@ -3443,6 +3920,203 @@ fn apply_orientation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The colour NR as it ran before 15/11/2026: whole frame, one plane and one
+    // direction at a time. The banded version must match it bit for bit.
+
+    /// The links of one à-trous level: from each pixel to the one `hole` and
+    /// `2 * hole` to its right (`right`) and below it (`below`); 0 past the frame.
+    struct ChromaNrLinks {
+        right: [Vec<u8>; 2],
+        below: [Vec<u8>; 2],
+    }
+
+    fn chroma_nr_links(luma: &[f32], w: usize, h: usize, level: usize) -> ChromaNrLinks {
+        let hole = 1usize << level;
+        let towards = |dx: usize, dy: usize| -> Vec<u8> {
+            let mut links = vec![0u8; w * h];
+            links.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                if y + dy >= h {
+                    return;
+                }
+                let here = &luma[y * w..][..w];
+                let there = &luma[(y + dy) * w..][..w];
+                for (x, slot) in row.iter_mut().enumerate().take(w.saturating_sub(dx)) {
+                    *slot = chroma_nr_link(here[x], there[x + dx]);
+                }
+            });
+            links
+        };
+        ChromaNrLinks {
+            right: [towards(hole, 0), towards(2 * hole, 0)],
+            below: [towards(0, hole), towards(0, 2 * hole)],
+        }
+    }
+
+    /// One separable à-trous B3-spline smoothing pass at hole spacing `1 << level`,
+    /// each tap weighted by its link to the pixel being smoothed; taps past the
+    /// frame are left out. Parallel over rows.
+    fn atrous_smooth_linked(
+        src: &[f32],
+        w: usize,
+        h: usize,
+        level: usize,
+        links: &ChromaNrLinks,
+    ) -> Vec<f32> {
+        // B3 = [1, 4, 6, 4, 1] / 16 and links run to 255; both scales cancel in the
+        // normalisation.
+        const CENTRE: f32 = 6.0 * 255.0;
+        const NEAR: f32 = 4.0;
+        const FAR: f32 = 1.0;
+        let hole = 1usize << level;
+        let mut tmp = vec![0.0f32; w * h];
+        tmp.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+            let row = &src[y * w..][..w];
+            let near = &links.right[0][y * w..][..w];
+            let far = &links.right[1][y * w..][..w];
+            for (x, slot) in out.iter_mut().enumerate() {
+                let mut acc = CENTRE * row[x];
+                let mut norm = CENTRE;
+                let mut tap = |at: usize, weight: f32| {
+                    acc += weight * row[at];
+                    norm += weight;
+                };
+                if x >= hole {
+                    tap(x - hole, NEAR * near[x - hole] as f32);
+                }
+                if x >= 2 * hole {
+                    tap(x - 2 * hole, FAR * far[x - 2 * hole] as f32);
+                }
+                if x + hole < w {
+                    tap(x + hole, NEAR * near[x] as f32);
+                }
+                if x + 2 * hole < w {
+                    tap(x + 2 * hole, FAR * far[x] as f32);
+                }
+                *slot = acc / norm;
+            }
+        });
+        let (near, far) = (&links.below[0], &links.below[1]);
+        let tmp = &tmp;
+        let mut dst = vec![0.0f32; w * h];
+        dst.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+            for (x, slot) in out.iter_mut().enumerate() {
+                let i = y * w + x;
+                let mut acc = CENTRE * tmp[i];
+                let mut norm = CENTRE;
+                let mut tap = |at: usize, weight: f32| {
+                    acc += weight * tmp[at];
+                    norm += weight;
+                };
+                if y >= hole {
+                    let up = i - hole * w;
+                    tap(up, NEAR * near[up] as f32);
+                }
+                if y >= 2 * hole {
+                    let up = i - 2 * hole * w;
+                    tap(up, FAR * far[up] as f32);
+                }
+                if y + hole < h {
+                    tap(i + hole * w, NEAR * near[i] as f32);
+                }
+                if y + 2 * hole < h {
+                    tap(i + 2 * hole * w, FAR * far[i] as f32);
+                }
+                *slot = acc / norm;
+            }
+        });
+        dst
+    }
+
+    /// Whole-frame colour-noise reduction on the linear RGBA-f16 scene master. Splits
+    /// each pixel into luminance + chroma offsets (the chroma part carries zero luma
+    /// by construction, so this cannot shift brightness or luma detail), à-trous
+    /// shrinks the finest chroma detail levels among pixels of like luminance (see
+    /// [`chroma_nr_link`]), and recomposes. Neutral pixels have zero chroma so they
+    /// are untouched.
+    fn denoise_scene_chroma_whole_frame(scene: &mut [u16], w: usize, h: usize, strength: f32) {
+        if strength.abs() < 1e-4 || w < 8 || h < 8 {
+            return;
+        }
+        const LW: [f32; 3] = [0.22, 0.69, 0.09];
+        let n = w * h;
+        // Decode once into luma + three chroma planes.
+        let mut luma = vec![0.0f32; n];
+        let mut chroma = [vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]];
+        {
+            let [c0, c1, c2] = &mut chroma;
+            luma.par_chunks_mut(w)
+                .zip(c0.par_chunks_mut(w))
+                .zip(c1.par_chunks_mut(w).zip(c2.par_chunks_mut(w)))
+                .zip(scene.par_chunks(w * 4))
+                .for_each(|(((l, c0), (c1, c2)), src)| {
+                    for x in 0..w {
+                        let rgb = [
+                            f16_bits_to_f32(src[x * 4]),
+                            f16_bits_to_f32(src[x * 4 + 1]),
+                            f16_bits_to_f32(src[x * 4 + 2]),
+                        ];
+                        let y = LW[0] * rgb[0] + LW[1] * rgb[1] + LW[2] * rgb[2];
+                        l[x] = y;
+                        c0[x] = rgb[0] - y;
+                        c1[x] = rgb[1] - y;
+                        c2[x] = rgb[2] - y;
+                    }
+                });
+        }
+        let links: Vec<ChromaNrLinks> = (0..SCENE_CHROMA_NR_ATTEN.len())
+            .map(|level| chroma_nr_links(&luma, w, h, level))
+            .collect();
+        // À-trous shrink each chroma plane in place: subtract the attenuated fine
+        // detail of each level (memory-light: only prev/next/accumulator live).
+        for plane in chroma.iter_mut() {
+            let mut prev = plane.clone();
+            for (level, (&atten, links)) in SCENE_CHROMA_NR_ATTEN.iter().zip(&links).enumerate() {
+                let next = atrous_smooth_linked(&prev, w, h, level, links);
+                let k = strength * atten;
+                plane
+                    .par_iter_mut()
+                    .zip(prev.par_iter())
+                    .zip(next.par_iter())
+                    .for_each(|((v, &p), &nx)| *v -= k * (p - nx));
+                prev = next;
+            }
+        }
+        // Recompose luma + denoised chroma back into the scene master.
+        scene
+            .par_chunks_mut(w * 4)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for x in 0..w {
+                    let i = y * w + x;
+                    let l = luma[i];
+                    for ch in 0..3 {
+                        row[x * 4 + ch] = f32_to_f16_bits((l + chroma[ch][i]).max(0.0));
+                    }
+                }
+            });
+    }
+
+    #[test]
+    fn banded_colour_nr_equals_the_whole_frame_one() {
+        // Odd sizes so the last band and tile are partial; ramps and specks so
+        // every link value turns up.
+        for &(w, h) in &[(301usize, 77usize), (8, 8), (520, 40)] {
+            let vals: Vec<[f32; 3]> = (0..w * h)
+                .map(|i| {
+                    let (x, y) = ((i % w) as f32, (i / w) as f32);
+                    let s = ((i * 2654435761usize) % 1000) as f32 / 1000.0;
+                    let base = 0.002 + 0.9 * ((x * 0.031 + y * 0.017).sin() * 0.5 + 0.5).powi(3);
+                    [base * (0.8 + 0.4 * s), base, base * (1.2 - 0.4 * s)]
+                })
+                .collect();
+            let mut banded = scene_buf_rgb(&vals);
+            let mut whole = banded.clone();
+            denoise_scene_chroma(&mut banded, w, h, SCENE_COLOR_NR);
+            denoise_scene_chroma_whole_frame(&mut whole, w, h, SCENE_COLOR_NR);
+            assert!(banded == whole, "{w}x{h}: banded colour NR differs");
+        }
+    }
 
     #[test]
     fn jpeg_match_plan_splits_matrix_and_curves_without_env_state() {
@@ -4869,6 +5543,53 @@ mod tests {
             e_malvar < e_bilin,
             "Malvar should reconstruct with less error than bilinear: malvar={e_malvar:.3} bilinear={e_bilin:.3}"
         );
+    }
+
+    /// The tiled demosaic the decode runs gives the whole-frame reference's
+    /// pixels exactly, wherever the tile lies: against the sensor's edges, in
+    /// its middle, one pixel wide.
+    #[test]
+    fn ahd_tiles_equal_the_whole_frame_demosaic() {
+        let (w, h) = (53usize, 41usize);
+        let cfa = rggb();
+        let mut seed = 0x2545_f491u32;
+        let plane: Vec<f32> = (0..w * h)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (seed >> 8) as f32 / (1u32 << 24) as f32;
+                // Texture, a hard edge and deep shadow.
+                let edge = if i % w > w / 2 { 0.9 } else { 0.02 };
+                edge * (0.4 + 0.6 * noise)
+            })
+            .collect();
+        let cam2xyz = [
+            [0.6, 0.3, 0.1, 0.0],
+            [0.25, 0.7, 0.05, 0.0],
+            [0.05, 0.15, 0.8, 0.0],
+        ];
+        let whole = demosaic_ahd(&plane, w, h, &cfa, &cam2xyz, None).unwrap();
+        let mut scratch = AhdScratch::default();
+        let mut tile = Vec::new();
+        for (x, y) in [
+            ((0, w), (0, h)),
+            ((0, 7), (0, 5)),
+            ((7, 30), (5, 9)),
+            ((30, w), (9, h)),
+            ((w - 1, w), (h - 1, h)),
+            ((2, 3), (3, 4)),
+        ] {
+            demosaic_ahd_tile(&plane, w, h, &cfa, &cam2xyz, x, y, &mut scratch, &mut tile);
+            assert_eq!(tile.len(), (x.1 - x.0) * (y.1 - y.0));
+            for (i, got) in tile.iter().enumerate() {
+                let (r, c) = (y.0 + i / (x.1 - x.0), x.0 + i % (x.1 - x.0));
+                let want = whole[r * w + c];
+                assert_eq!(
+                    got.map(f32::to_bits),
+                    want.map(f32::to_bits),
+                    "tile {x:?} {y:?} at row {r}, column {c}"
+                );
+            }
+        }
     }
 
     #[test]

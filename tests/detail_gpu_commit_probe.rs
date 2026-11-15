@@ -268,7 +268,7 @@ fn gpu_detail_preview_vs_commit_on_a_photo() {
             ]
         };
         for (label, settings, color_s) in cases {
-            let committed = apply_scene_to_tilemap(&scene, settings, None).flatten();
+            let committed = apply_scene_to_tilemap(&scene, settings).flatten();
             let mut commit_stack = LayerStack::new(w, h);
             commit_stack.layers[0] = Layer::from_rgba(0, "Background", committed.clone(), w, h);
             let after = composite(&commit_stack, None);

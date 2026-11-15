@@ -638,7 +638,7 @@ fn raw_q1_art_ab() {
                 ..Default::default()
             };
             (recipe.apply_iai)(&mut settings);
-            let iai_full = apply_scene_to_tilemap(scene, &settings, None).flatten16();
+            let iai_full = apply_scene_to_tilemap(scene, &settings).flatten16();
             let (iai16, ow, oh) = box_resample_width(&iai_full, scene.width, scene.height, width);
             drop(iai_full);
             let iai_png = iai_dir.join(format!("{stem}__{}.png", recipe.id));

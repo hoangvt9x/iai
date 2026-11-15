@@ -45,7 +45,7 @@ fn settled_pixel_evaluator_matches_committed_scene_for_non_spatial_edits() {
                 scene.color_pipeline.working.from_linear_srgb(input),
             );
         }
-        let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten16();
+        let committed = apply_scene_to_tilemap(&scene, &settings).flatten16();
         for (x, _input) in inputs.iter().copied().enumerate() {
             // Commit reads the f16 scene master, so parity must evaluate the
             // same representable input rather than the original f32 literal.
@@ -110,7 +110,7 @@ fn headless_identity_colour_preview_matches_commit() {
         };
         settings.mixer_hue[1] = -40.0;
         settings.mixer_luminance[1] = 60.0;
-        let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+        let committed = apply_scene_to_tilemap(&scene, &settings).flatten();
 
         // The live colour path for an Identity scene (develop_preview.rs).
         let s = 6; // the commit's COLOR_DOWNSAMPLE grid
@@ -228,7 +228,7 @@ fn headless_identity_fast_preview_matches_commit() {
         ("sat+clarity", sat_clarity),
         ("sat+mixer+sharp", sat_mixer_sharp),
     ] {
-        let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+        let committed = apply_scene_to_tilemap(&scene, &settings).flatten();
         let tone = iai::core::develop_scene::build_scene_tone_for_scene(&settings, &scene);
         let (base, pw, ph) = iai::core::develop_scene::build_scene_fast_base(
             &scene,
@@ -341,7 +341,7 @@ fn headless_gpu_preview_matches_committed_scene() {
         curve_points: vec![[0.0, 0.0], [0.25, 0.20], [0.70, 0.78], [1.0, 1.0]],
         ..Default::default()
     };
-    let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+    let committed = apply_scene_to_tilemap(&scene, &settings).flatten();
     let neutral = render_default_look(&scene);
     let neutral8: Vec<u8> = neutral.iter().map(|v| (v >> 8) as u8).collect();
     let mut stack = LayerStack::new(width, height);
@@ -404,7 +404,7 @@ fn headless_gpu_preview_matches_committed_scene() {
     v3.midtones = 35.0;
     v3.mixer_hue = [24.0, -13.0, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0];
     v3.mixer_saturation = [18.0, -11.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0];
-    let committed_v3 = apply_scene_to_tilemap(&scene, &v3, None).flatten();
+    let committed_v3 = apply_scene_to_tilemap(&scene, &v3).flatten();
     let tone = iai::core::develop_scene::build_scene_tone_for_scene(&v3, &scene);
     let (base, pw, ph) =
         iai::core::develop_scene::build_scene_color_base_box(&scene, 0, 0, width, height, 1);
@@ -468,8 +468,8 @@ fn headless_gpu_preview_matches_committed_scene() {
         color_noise_reduction: 51.0,
         ..v3
     };
-    let committed_detail16 = apply_scene_to_tilemap(&scene, &detail_settings, None).flatten16();
-    let committed_detail = apply_scene_to_tilemap(&scene, &detail_settings, None).flatten();
+    let committed_detail16 = apply_scene_to_tilemap(&scene, &detail_settings).flatten16();
+    let committed_detail = apply_scene_to_tilemap(&scene, &detail_settings).flatten();
     let exact: Vec<[f32; 3]> = committed_detail16
         .chunks_exact(4)
         .map(|p| {
@@ -595,14 +595,14 @@ fn headless_gpu_detail_raw_matches_commit() {
     };
     settings.mixer_hue[1] = -20.0;
     settings.mixer_saturation[4] = 25.0;
-    let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+    let committed = apply_scene_to_tilemap(&scene, &settings).flatten();
     let no_detail = DevelopSettings {
         sharpening: 0.0,
         noise_reduction: 0.0,
         color_noise_reduction: 0.0,
         ..settings.clone()
     };
-    let committed_plain = apply_scene_to_tilemap(&scene, &no_detail, None).flatten();
+    let committed_plain = apply_scene_to_tilemap(&scene, &no_detail).flatten();
     let detail_effect = max_abs_rgb(&committed, &committed_plain, |_, _| true, width as usize);
     assert!(
         detail_effect > 8,
@@ -732,7 +732,7 @@ fn headless_gpu_detail_identity_matches_commit() {
         ..Default::default()
     };
     for (label, settings) in [("light+colour", with_colour), ("light", light_only)] {
-        let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+        let committed = apply_scene_to_tilemap(&scene, &settings).flatten();
         let tone = iai::core::develop_scene::build_scene_tone_for_scene(&settings, &scene);
         let region_luma = settings.has_local_tone().then(|| {
             let (b, w, h) = iai::core::develop_scene::build_scene_region_base(
@@ -828,7 +828,7 @@ fn headless_gpu_detail_plane_offset_and_downsample() {
         noise_reduction: 20.0,
         ..Default::default()
     };
-    let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+    let committed = apply_scene_to_tilemap(&scene, &settings).flatten();
     let preview = |detail: DevelopDetailGpu| DevelopGpuPreview {
         layer_id: 0,
         settings: settings.clone(),
@@ -1082,7 +1082,7 @@ fn headless_gpu_effects_match_commit() {
             ("effects+sat+Detail", &effects_sat),
             ("effects+mixer+Detail", &effects_mixer),
         ] {
-            let committed = apply_scene_to_tilemap(&scene, settings, None).flatten();
+            let committed = apply_scene_to_tilemap(&scene, settings).flatten();
             compositor.develop_preview = Some(plane_preview(&scene, settings, raw));
             let is_ping = compositor
                 .composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
@@ -1226,7 +1226,7 @@ fn headless_gpu_local_masks_match_commit() {
             ("masks+sat", &with_colour, false),
             ("masks+sat+Clarity+Detail", &with_detail, true),
         ] {
-            let committed = apply_scene_to_tilemap(&scene, settings, None).flatten();
+            let committed = apply_scene_to_tilemap(&scene, settings).flatten();
             let mut preview = plane_preview(&scene, settings, raw);
             if !plane {
                 // The ordinary shader path: Identity colour through the app's
@@ -1381,7 +1381,7 @@ fn headless_zoomed_out_display_averages_the_pixel_grid() {
         saturation: 25.0,
         ..Default::default()
     };
-    let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+    let committed = apply_scene_to_tilemap(&scene, &settings).flatten();
     compositor.develop_preview = Some(DevelopGpuPreview {
         layer_id: 0,
         settings,
@@ -1480,7 +1480,7 @@ fn headless_zoomed_out_plane_averages_committed_pixels() {
         // A 6 px block's grid: 3 taps per axis, each the mean of a 2×2
         // sub-block — the chain on the half-resolution scene, then averaged.
         let half = downsample_scene_2x(&scene);
-        let half_committed = apply_scene_to_tilemap(&half, &settings, None).flatten();
+        let half_committed = apply_scene_to_tilemap(&half, &settings).flatten();
         let tone = iai::core::develop_scene::build_scene_tone_for_scene(&settings, &scene);
         let mut compositor = CompositorState::new(&device, width, height, max_texture);
         compositor.develop_preview = Some(DevelopGpuPreview {
@@ -1524,4 +1524,103 @@ fn headless_zoomed_out_plane_averages_committed_pixels() {
             "zoomed-out plane max error {max_error}/255"
         );
     }
+}
+
+/// Develop with a selection on the GPU: the layer developed under the
+/// selection as a mask, over its own untouched copy (`with_masked_copy_over`),
+/// must show what the commit gives — the edit inside, the layer as it was
+/// outside. Before 15/11 a selection sent the preview to a full CPU bake per
+/// slider tick, which lagged badly on a big RAW.
+#[test]
+fn headless_develop_with_a_selection_matches_commit() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("headless GPU pixel parity is a local real-GPU test; skipped on CI");
+        return;
+    }
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no headless GPU adapter; skipped");
+        return;
+    };
+    let (width, height) = (96u32, 48u32);
+    let mut px = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            px.extend_from_slice(&[(40 + x * 2) as u8, (60 + y * 3) as u8, 140, 255]);
+        }
+    }
+    let tiles = iai::core::tile::TileMap::from_rgba(&px, width, height);
+    let scene = Arc::new(SceneSource::from_display_tiles(&tiles));
+    let mut stack = LayerStack::new(width, height);
+    stack.layers[0] = Layer::from_rgba(0, "Background", px.clone(), width, height);
+    let half = width / 2;
+    let mut selection = iai::core::selection::Selection::new(width, height);
+    selection.select_rect(0, 0, half, height);
+    let mask_rgba: Vec<u8> = (0..width * height)
+        .flat_map(|i| {
+            let m = if i % width < half { 255 } else { 0 };
+            [m, m, m, 255]
+        })
+        .collect();
+    let mask = iai::core::layer::LayerMask {
+        tiles: iai::core::tile::TileMap::from_rgba(&mask_rgba, width, height),
+        width,
+        height,
+        enabled: true,
+        inverted: false,
+        bake_offset: (0, 0),
+        bake_frame_offset: (0, 0),
+    };
+    let settings = DevelopSettings {
+        exposure: 35.0,
+        contrast: 20.0,
+        ..Default::default()
+    };
+    let committed = iai::core::develop::keep_within_selection(
+        apply_scene_to_tilemap(&scene, &settings),
+        &tiles,
+        &iai::core::develop::DevelopSelection {
+            selection: Arc::new(selection),
+            layer_offset: (0, 0),
+        },
+    )
+    .flatten();
+    let max_texture = device.limits().max_texture_dimension_2d;
+    let mut compositor = CompositorState::new(&device, width, height, max_texture);
+    compositor.develop_preview = Some(DevelopGpuPreview {
+        layer_id: 0,
+        settings,
+        region_luma: None,
+        color: None,
+        scene: Some(scene.clone()),
+        detail: None,
+    });
+    let masked = stack.with_masked_copy_over(0, &mask).unwrap();
+    let is_ping =
+        compositor.composite_layers(&device, &queue, &masked, 0.0, 0.0, 1.0, None, false, false);
+    let gpu = compositor.readback_rgba8(&device, &queue, is_ping);
+    let (mut inside, mut outside) = (0u8, 0u8);
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let k = (y * width as usize + x) * 4;
+            for c in 0..3 {
+                let error = gpu[k + c].abs_diff(committed[k + c]);
+                if x < half as usize {
+                    inside = inside.max(error);
+                } else {
+                    outside = outside.max(error);
+                }
+            }
+        }
+    }
+    let probe = (10 * width as usize + 10) * 4;
+    assert!(
+        committed[probe] > px[probe] + 10,
+        "test setup: the edit must brighten the selected half"
+    );
+    eprintln!("selection preview/commit max inside={inside}/255 outside={outside}/255");
+    assert!(inside <= 2, "inside the selection: {inside}/255");
+    assert_eq!(
+        outside, 0,
+        "outside the selection the layer must stay as it was"
+    );
 }
