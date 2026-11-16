@@ -54,15 +54,14 @@ pub use iai_imaging::smart_brush;
 pub use iai_vector::vector;
 pub mod vietqr;
 pub use iai_color::working_color;
+pub use iai_imaging::grid_warp;
 pub use iai_imaging::warp;
 
-pub mod canvas_editor_conversion;
 pub use iai_ai::lama;
 pub use iai_canvas::document;
 pub use iai_canvas::free_transform;
 pub use iai_color::gamut_map;
 pub use iai_imaging::filters;
-pub use iai_layout::mail_merge;
 #[cfg(feature = "pro")]
 pub use iai_pro::core::imposition;
 pub use iai_raster::fast_math;
@@ -71,12 +70,10 @@ pub mod presets;
 pub use crate::formats::svg;
 pub use iai_ai::select_subject;
 pub use iai_canvas::print;
-pub use iai_doc::text_document;
 pub use iai_geom::snapping;
 pub use iai_print::print_gdi;
 pub use iai_print::printers;
 pub use iai_raster::tile;
 pub use iai_text::text;
-pub use iai_text::text_layout;
 
 pub use canvas::{Canvas, DEFAULT_H, DEFAULT_W};

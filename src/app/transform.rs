@@ -429,7 +429,7 @@ impl App {
             return;
         }
         if std::mem::take(&mut self.edit.warp_after_transform_commit) {
-            self.begin_warp();
+            self.begin_grid_warp();
         }
     }
 
@@ -1097,8 +1097,9 @@ impl App {
         self.shell.status_msg = format!("Free Transform — {mode:?}");
     }
 
-    /// Warp uses the existing mesh editor. The pending transform is committed
-    /// first when necessary; an unchanged transform can switch immediately.
+    /// Warp on a grid, as Photoshop's (16/11: it used to open the Liquify-like
+    /// brush warp, no grid at all). The pending transform is committed first
+    /// when necessary; an unchanged transform can switch immediately.
     pub fn transform_start_warp(&mut self) {
         let unchanged = self.edit.transform_state.as_ref().is_some_and(|ts| {
             ts.quad.is_none()
@@ -1110,13 +1111,13 @@ impl App {
         });
         if unchanged {
             self.cancel_transform();
-            self.begin_warp();
+            self.begin_grid_warp();
         } else {
             self.edit.warp_after_transform_commit = true;
             self.commit_transform();
             if self.edit.pending_transform_commit.is_none() {
                 self.edit.warp_after_transform_commit = false;
-                self.begin_warp();
+                self.begin_grid_warp();
             }
         }
     }

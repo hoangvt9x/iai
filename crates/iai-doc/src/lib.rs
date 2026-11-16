@@ -18,5 +18,4 @@ pub mod placed_image;
 pub mod portrait_recipe;
 pub mod selection;
 pub mod shape;
-pub mod text_document;
 pub mod vector;

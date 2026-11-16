@@ -257,7 +257,7 @@ mod loaded {
 
         /// Hand-run over a folder of RAW files:
         /// `$env:IAI_RAW_CORPUS='C:\path\to\raws'`, then
-        /// `cargo test --release --lib --features canvas-editor-webview probe_library_file -- --ignored --nocapture`
+        /// `cargo test --release --lib probe_library_file -- --ignored --nocapture`
         #[test]
         #[ignore]
         fn probe_library_file_and_linked_decoder_agree_on_the_corpus() {

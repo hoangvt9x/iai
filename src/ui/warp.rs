@@ -59,7 +59,12 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
             ui.add_space(8.0);
             ui.label("Brush");
-            changed |= dev_slider(ui, "Size", &mut params.size, 10.0..=1000.0);
+            changed |= dev_slider(
+                ui,
+                "Size",
+                &mut params.size,
+                10.0..=data.dialogs.warp_size_max,
+            );
             changed |= dev_slider(ui, "Pressure", &mut params.pressure, 0.05..=1.0);
 
             ui.add_space(6.0);
@@ -111,14 +116,27 @@ fn draw_freeze_overlay(ctx: &egui::Context, data: &UiData) {
     if view.gw == 0 || view.gh == 0 {
         return;
     }
-    // Semi-transparent warm red where frozen.
-    let pixels: Vec<egui::Color32> = view
-        .alpha
-        .iter()
-        .map(|&a| egui::Color32::from_rgba_unmultiplied(220, 40, 40, (a as u16 * 120 / 255) as u8))
-        .collect();
-    let img = egui::ColorImage::new([view.gw, view.gh], pixels);
-    let tex = ctx.load_texture("warp_freeze", img, egui::TextureOptions::LINEAR);
+    // The texture is made again only when the mask changed (it was uploaded
+    // anew every frame).
+    let id = egui::Id::new("warp_freeze_texture");
+    let kept: Option<(u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(id));
+    let tex = match kept {
+        Some((rev, tex)) if rev == view.rev => tex,
+        _ => {
+            // Semi-transparent warm red where frozen.
+            let pixels: Vec<egui::Color32> = view
+                .alpha
+                .iter()
+                .map(|&a| {
+                    egui::Color32::from_rgba_unmultiplied(220, 40, 40, (a as u16 * 120 / 255) as u8)
+                })
+                .collect();
+            let img = egui::ColorImage::new([view.gw, view.gh], pixels);
+            let tex = ctx.load_texture("warp_freeze", img, egui::TextureOptions::LINEAR);
+            ctx.data_mut(|d| d.insert_temp(id, (view.rev, tex.clone())));
+            tex
+        }
+    };
     let min = egui::pos2(
         data.doc.offset_x + view.layer_x * data.doc.zoom,
         data.doc.offset_y + view.layer_y * data.doc.zoom,

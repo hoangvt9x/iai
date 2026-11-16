@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: cargo xtask layers
-       cargo xtask lints [--update] [arguments for cargo clippy, e.g. --features iai/canvas-editor-webview]
+       cargo xtask lints [--update] [arguments for cargo clippy, e.g. --no-default-features]
        cargo xtask intents [--list] [--update]
        cargo xtask panic-hunt
        cargo xtask export-public [--sync] <folder outside the repository>
@@ -58,15 +58,7 @@ fn main() -> ExitCode {
 fn panic_hunt() -> Result<(), String> {
     for args in [
         &["test", "-p", "iai-engine", "--lib", "panic_hunt"][..],
-        &[
-            "test",
-            "-p",
-            "iai",
-            "--lib",
-            "--features",
-            "canvas-editor-webview",
-            "panic_hunt",
-        ][..],
+        &["test", "-p", "iai", "--lib", "panic_hunt"][..],
     ] {
         let status = cargo()
             .args(args)

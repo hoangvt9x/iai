@@ -6,10 +6,10 @@
 # out). `cargo xtask intents --list` prints the ones left.
 AiIntent 7
 ChannelsIntent 1
-ChromeIntent 42
+ChromeIntent 41
 DevelopIntent 13
-DialogIntent 77
-DocumentIntent 77
+DialogIntent 76
+DocumentIntent 68
 LayerIntent 11
 LibraryIntent 6
 PrintIntent 20

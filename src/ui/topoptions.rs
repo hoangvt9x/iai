@@ -227,6 +227,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             | ToolId::SelectionEllipse
                             | ToolId::Lasso
                             | ToolId::PolygonLasso => selection_options(ui, data, actions),
+                            ToolId::Transform if data.tool.grid_warp.is_some() => {
+                                grid_warp_options(ui, data, actions)
+                            }
                             ToolId::Transform => transform_options(ui, data, actions),
                             ToolId::Text => text_options(ui, data, actions),
                             ToolId::Shape => shape_options(ui, data, actions),
@@ -3018,6 +3021,30 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 .size(10.5)
                 .color(pal.text_disabled),
         );
+    }
+}
+
+/// Warp on a grid: what to do, and ✗ / ✓ (the transform's own, which the
+/// app sends to the warp while it is open).
+fn grid_warp_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    let pal = data.chrome.theme_mode.palette();
+    ui.label("Warp: kéo 4 góc, tay nắm xanh, hoặc bất kỳ chỗ nào trong lưới để uốn");
+    ui.separator();
+    let cancel_btn = egui::Button::new(top_options_icon(ph::X).color(pal.danger))
+        .min_size(egui::vec2(26.0, 22.0));
+    let cancel_btn = modal_flash_btn(cancel_btn, ui, data);
+    if ui.add(cancel_btn).on_hover_text("Hủy Warp (Esc)").clicked() {
+        actions.tool.transform_cancel = true;
+    }
+    let commit_btn = egui::Button::new(top_options_icon(ph::CHECK).color(pal.success))
+        .min_size(egui::vec2(26.0, 22.0));
+    let commit_btn = modal_flash_btn(commit_btn, ui, data);
+    if ui
+        .add(commit_btn)
+        .on_hover_text("Áp dụng Warp (Enter)")
+        .clicked()
+    {
+        actions.tool.transform_commit = true;
     }
 }
 

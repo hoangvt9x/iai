@@ -40,15 +40,13 @@ jobs:
       # `--all`: the crates under crates/ too.
       - name: Check formatting
         run: cargo fmt --all --check
-      # The published builds always have the Canvas Editor
-      # (`document_webview.rs`); without the feature here it was never compiled.
-      - name: Build (as shipped, with the Canvas Editor)
-        run: cargo build --locked --features canvas-editor-webview
+      - name: Build (as shipped)
+        run: cargo build --locked
       # The unit tests are the suite kept green day to day.
       # Every crate of the workspace, as shipped (the app's features turn on
       # those of the crates: the Pro part, the RAW DLL).
       - name: Test (every crate, as shipped; includes WGSL validation)
-        run: cargo test --locked --workspace --lib --features iai/canvas-editor-webview
+        run: cargo test --locked --workspace --lib
       - name: Test (the workspace checks)
         run: cargo test --locked -p xtask
       # The integration tests in `tests/`: colour-pipeline and CPU/GPU parity
@@ -56,10 +54,7 @@ jobs:
       # here (`CI` is set).
       - name: Test (integration tests in tests/)
         timeout-minutes: 20
-        run: cargo test --locked --features canvas-editor-webview --test '*'
-      # The feature is optional, so the build without it has to keep compiling.
-      - name: Check (without the Canvas Editor)
-        run: cargo check --locked
+        run: cargo test --locked --test '*'
 
   # Portability gate (blocking). Linux and macOS must keep compiling. Now that
   # `cargo check` passes on both, this enforces the source stays cross-platform
@@ -159,9 +154,7 @@ jobs:
           toolchain: 1.97.0
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Clippy (as shipped, with the Canvas Editor)
-        run: cargo xtask lints --features iai/canvas-editor-webview
-      - name: Clippy (without the Canvas Editor)
+      - name: Clippy (as shipped)
         run: cargo xtask lints
       - name: Crate layers
         run: cargo xtask layers

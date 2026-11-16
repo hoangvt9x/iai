@@ -17,7 +17,8 @@ pub struct DocSummary {
     pub title: String,
     /// The file it was opened from or saved to.
     pub path: Option<String>,
-    /// `canvas` (layers of pixels and shapes) or `text` (a flowing text document).
+    /// `canvas` (layers of pixels and shapes): every document is one now
+    /// (the text editor was taken out).
     pub kind: String,
     pub width_px: u32,
     pub height_px: u32,
@@ -90,7 +91,7 @@ fn summary_of(d: &Document, shown: bool) -> DocSummary {
         doc: d.id.0,
         title: d.tab_title().to_string(),
         path: d.path.as_ref().map(|p| p.display().to_string()),
-        kind: if d.is_flow_text() { "text" } else { "canvas" }.to_string(),
+        kind: "canvas".to_string(),
         width_px: d.canvas.width,
         height_px: d.canvas.height,
         pages: page_count(d),
@@ -275,9 +276,7 @@ impl Command for Inspect {
             height_mm: mm(c.height),
             page,
             page_list,
-            layers: if d.is_flow_text() {
-                Vec::new()
-            } else {
+            layers: {
                 let mut layers = layer_infos(c);
                 if let Some(frame) = s.registry().sheet_frame() {
                     for l in &mut layers {

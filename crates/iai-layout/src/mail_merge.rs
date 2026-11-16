@@ -1,20 +1,12 @@
-//! Mail merge: fill a flowing-text template with rows from a CSV/Excel file and
-//! produce one merged [`TextDocument`] per row (phase 6 of the word-processor
-//! plan). This module is deliberately **pure data**: it reads a data source into
-//! a [`MergeTable`], substitutes `{{field}}` placeholders in a template
-//! [`TextDocument`] while preserving per-run character styling, and builds safe
-//! output file names. It knows nothing about egui, the job queue or PDF export;
-//! the app wires those around it. Keeping it engine-agnostic lets the risky
-//! parsing/substitution logic be unit-tested in isolation.
+//! Data for filling templates: a CSV / Excel file read into a [`MergeTable`]
+//! (the vector templates of the Pro pack fill their fields from it), and safe
+//! output file names from a `{{field}}` pattern. Pure data: nothing about
+//! egui, the job queue or PDF.
 //!
-//! Placeholder syntax is `{{Field name}}` — the name is matched against the data
-//! headers case-insensitively and after trimming outer spaces, so a header
-//! `Họ tên` matches `{{Họ tên}}` or `{{ ho ten }}`... (only case/space differ;
-//! the letters must match). A known field with an empty cell becomes empty text;
-//! an *unknown* field is left as the literal `{{...}}` so a typo is visible in
-//! the output rather than silently blanked.
+//! A field `{{Field name}}` is matched against the data headers
+//! case-insensitively and after trimming outer spaces (the letters must
+//! match).
 
-use iai_doc::text_document::{Paragraph, Run, TextDocument};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -266,154 +258,6 @@ fn scan_placeholders(chars: &[char]) -> Vec<Placeholder> {
     out
 }
 
-/// Distinct merge field names used by `doc`, in first-appearance order.
-pub fn find_fields(doc: &TextDocument) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::new();
-    for para in &doc.paragraphs {
-        if para.is_image() {
-            continue;
-        }
-        let chars: Vec<char> = para.text().chars().collect();
-        for ph in scan_placeholders(&chars) {
-            if !seen
-                .iter()
-                .any(|s| normalize_key(s) == normalize_key(&ph.name))
-            {
-                seen.push(ph.name);
-            }
-        }
-    }
-    seen
-}
-
-/// How a template's fields line up with a data table: which are present as a
-/// column and which are missing. Used by the pre-export dialog.
-pub struct MergeAnalysis {
-    pub matched: Vec<String>,
-    pub missing: Vec<String>,
-}
-
-pub fn analyze(doc: &TextDocument, table: &MergeTable) -> MergeAnalysis {
-    let mut matched = Vec::new();
-    let mut missing = Vec::new();
-    for field in find_fields(doc) {
-        if table.has_field(&field) {
-            matched.push(field);
-        } else {
-            missing.push(field);
-        }
-    }
-    MergeAnalysis { matched, missing }
-}
-
-// ---------------------------------------------------------------------------
-// Substitution
-// ---------------------------------------------------------------------------
-
-/// Produce a merged copy of `template` with every `{{field}}` replaced by the
-/// row's value. Per-run character styling is preserved: a replacement inherits
-/// the style of the run where its `{{` begins. Unknown fields are left as the
-/// literal placeholder.
-pub fn merge_document(template: &TextDocument, row: &MergeRow) -> TextDocument {
-    let mut doc = template.clone();
-    for para in &mut doc.paragraphs {
-        if para.is_image() {
-            continue;
-        }
-        substitute_paragraph(para, &|field| row.get(field).map(|v| v.to_string()));
-    }
-    doc.normalize();
-    doc
-}
-
-/// Rewrite one text paragraph's runs, substituting placeholders while keeping
-/// per-character style. `lookup` returns `None` for unknown fields (left raw).
-fn substitute_paragraph(para: &mut Paragraph, lookup: &dyn Fn(&str) -> Option<String>) {
-    let original_text = para.text();
-    let anchor_chars: Vec<usize> = para
-        .inline_images
-        .iter()
-        .map(|inline| {
-            let mut at = inline.byte_offset.min(original_text.len());
-            while !original_text.is_char_boundary(at) {
-                at -= 1;
-            }
-            original_text[..at].chars().count()
-        })
-        .collect();
-    // Flatten to per-char (glyph, style) so the replacement can inherit the
-    // style at the placeholder's opening brace even across run boundaries.
-    let mut chars: Vec<(char, usize)> = Vec::new();
-    let mut styles = Vec::with_capacity(para.runs.len());
-    for (run_idx, run) in para.runs.iter().enumerate() {
-        styles.push(run.style.clone());
-        for ch in run.text.chars() {
-            chars.push((ch, run_idx));
-        }
-    }
-    let glyphs: Vec<char> = chars.iter().map(|(c, _)| *c).collect();
-    let placeholders = scan_placeholders(&glyphs);
-    if placeholders.is_empty() {
-        return;
-    }
-
-    let mut out: Vec<(char, usize)> = Vec::with_capacity(chars.len());
-    let mut transforms: Vec<(usize, usize, usize)> = Vec::with_capacity(placeholders.len());
-    let mut cursor = 0;
-    for ph in &placeholders {
-        out.extend_from_slice(&chars[cursor..ph.start]);
-        let style_run = chars[ph.start].1;
-        match lookup(&ph.name) {
-            Some(value) => {
-                let before = out.len();
-                for ch in value.chars() {
-                    // Collapse hard line breaks in a cell into spaces so a
-                    // multi-line address does not break the paragraph model.
-                    let ch = if ch == '\n' || ch == '\r' { ' ' } else { ch };
-                    out.push((ch, style_run));
-                }
-                transforms.push((ph.start, ph.end, out.len() - before));
-            }
-            None => {
-                out.extend_from_slice(&chars[ph.start..ph.end]);
-                transforms.push((ph.start, ph.end, ph.end - ph.start));
-            }
-        }
-        cursor = ph.end;
-    }
-    out.extend_from_slice(&chars[cursor..]);
-
-    // Keep inline images attached to the same surrounding text when a merge
-    // field before them grows/shrinks. An anchor inside a replaced field moves
-    // to the field's opening boundary.
-    for (inline, original_pos) in para.inline_images.iter_mut().zip(anchor_chars) {
-        let mut delta = 0isize;
-        let mut mapped = None;
-        for &(start, end, replacement_len) in &transforms {
-            if original_pos <= start {
-                break;
-            }
-            if original_pos < end {
-                mapped = Some((start as isize + delta).max(0) as usize);
-                break;
-            }
-            delta += replacement_len as isize - (end - start) as isize;
-        }
-        let pos = mapped.unwrap_or_else(|| (original_pos as isize + delta).max(0) as usize);
-        inline.byte_offset = out.iter().take(pos).map(|(ch, _)| ch.len_utf8()).sum();
-    }
-
-    // Coalesce adjacent characters that share a run's style back into runs.
-    let mut runs: Vec<Run> = Vec::new();
-    for (ch, run_idx) in out {
-        match runs.last_mut() {
-            Some(last) if last.style == styles[run_idx] => last.text.push(ch),
-            _ => runs.push(Run::new(ch.to_string(), styles[run_idx].clone())),
-        }
-    }
-    para.runs = runs;
-}
-
 // ---------------------------------------------------------------------------
 // Output file names
 // ---------------------------------------------------------------------------
@@ -475,7 +319,6 @@ pub fn unique_stem(base: &str, used: &mut std::collections::HashSet<String>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iai_doc::text_document::{CharStyle, ParagraphStyle};
 
     fn table() -> MergeTable {
         MergeTable {
@@ -533,14 +376,6 @@ mod tests {
     }
 
     #[test]
-    fn find_fields_is_ordered_and_deduplicated() {
-        let doc = TextDocument::from_plain_text(
-            "Kính gửi {{Họ tên}},\nSố tiền {{Số tiền}} — {{Họ tên}} ký ngày {{Ngày}}.",
-        );
-        assert_eq!(find_fields(&doc), vec!["Họ tên", "Số tiền", "Ngày"]);
-    }
-
-    #[test]
     fn row_lookup_is_trim_and_case_insensitive() {
         let t = table();
         let row = t.row(0).unwrap();
@@ -549,105 +384,6 @@ mod tests {
         assert_eq!(row.get("SỐ TIỀN"), Some("1500000"));
         assert_eq!(row.get("ho ten"), None);
         assert_eq!(row.get("khong-co"), None);
-    }
-
-    #[test]
-    fn merge_replaces_known_fields_and_keeps_unknown_literal() {
-        let doc = TextDocument::from_plain_text("{{Họ tên}} nợ {{Số tiền}}đ, mã {{Ma}}.");
-        let merged = merge_document(&doc, &table().row(0).unwrap());
-        assert_eq!(merged.plain_text(), "Nguyễn Văn A nợ 1500000đ, mã {{Ma}}.");
-    }
-
-    #[test]
-    fn merge_keeps_inline_image_attached_after_a_resized_field() {
-        let mut doc = TextDocument::from_plain_text("{{Họ tên}} ký.");
-        doc.paragraphs[0]
-            .inline_images
-            .push(iai_doc::text_document::InlineImage {
-                byte_offset: "{{Họ tên}}".len(),
-                image: iai_doc::text_document::ImageBlock::inline(
-                    vec![1],
-                    10,
-                    10,
-                    12.0,
-                    iai_doc::text_document::ParagraphAlign::Left,
-                ),
-            });
-        let merged = merge_document(&doc, &table().row(0).unwrap());
-        assert_eq!(merged.plain_text(), "Nguyễn Văn A ký.");
-        assert_eq!(
-            merged.paragraphs[0].inline_images[0].byte_offset,
-            "Nguyễn Văn A".len()
-        );
-    }
-
-    #[test]
-    fn merge_blank_cell_becomes_empty() {
-        let doc = TextDocument::from_plain_text("{{Họ tên}}: {{Số tiền}}");
-        let merged = merge_document(&doc, &table().row(1).unwrap());
-        assert_eq!(merged.plain_text(), "Trần Thị B: ");
-    }
-
-    #[test]
-    fn merge_preserves_run_style_of_placeholder_start() {
-        // Two runs: a bold "{{Họ tên}}" then a plain " ký.".
-        let bold = CharStyle {
-            bold: true,
-            ..CharStyle::default()
-        };
-        let para = Paragraph {
-            runs: vec![
-                Run::new("{{Họ tên}}", bold.clone()),
-                Run::new(" ký.", CharStyle::default()),
-            ],
-            style: ParagraphStyle::default(),
-            image: None,
-            inline_images: Vec::new(),
-        };
-        let doc = TextDocument {
-            paragraphs: vec![para],
-            ..TextDocument::default()
-        };
-        let merged = merge_document(&doc, &table().row(0).unwrap());
-        let runs = &merged.paragraphs[0].runs;
-        // The substituted name keeps the bold style; the trailing text stays plain.
-        assert_eq!(runs[0].text, "Nguyễn Văn A");
-        assert!(runs[0].style.bold);
-        assert_eq!(runs[1].text, " ký.");
-        assert!(!runs[1].style.bold);
-    }
-
-    #[test]
-    fn merge_across_run_boundary_uses_opening_run_style() {
-        // Placeholder split across runs: "{{Ho" (bold) + "_ten}}" (plain).
-        let bold = CharStyle {
-            bold: true,
-            ..CharStyle::default()
-        };
-        let para = Paragraph {
-            runs: vec![
-                Run::new("{{Họ", bold),
-                Run::new(" tên}}!", CharStyle::default()),
-            ],
-            style: ParagraphStyle::default(),
-            image: None,
-            inline_images: Vec::new(),
-        };
-        let doc = TextDocument {
-            paragraphs: vec![para],
-            ..TextDocument::default()
-        };
-        let merged = merge_document(&doc, &table().row(0).unwrap());
-        assert_eq!(merged.plain_text(), "Nguyễn Văn A!");
-        assert!(merged.paragraphs[0].runs[0].style.bold);
-    }
-
-    #[test]
-    fn analyze_splits_matched_and_missing() {
-        let doc = TextDocument::from_plain_text("{{Họ tên}} {{Địa chỉ}}");
-        let a = analyze(&doc, &table());
-        assert_eq!(a.matched, vec!["Họ tên"]);
-        assert_eq!(a.missing, vec!["Địa chỉ"]);
     }
 
     #[test]
@@ -677,37 +413,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_to_pdf_writes_one_valid_pdf_per_row() {
-        // Exercises the batch worker's pipeline (minus the native dialogs):
-        // fixture -> merge each row -> layout -> selectable-text PDF on disk.
-        use iai_text::text_layout::DocumentLayout;
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("testdata/mail_merge_sample.xlsx");
-        let table = read_data_file(&path).unwrap();
-        let template = TextDocument::from_plain_text(
-            "HỢP ĐỒNG\nKhách hàng: {{Họ tên}}\nSố tiền: {{Số tiền}} đồng\nNgày: {{Ngày ký}}",
-        );
-        let mut fs = cosmic_text::FontSystem::new();
-        let dir = std::env::temp_dir().join(format!("iai_mm_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut used = std::collections::HashSet::new();
-        for i in 0..table.row_count() {
-            let row = table.row(i).unwrap();
-            let merged = merge_document(&template, &row);
-            let stem = unique_stem(&expand_filename("{{Họ tên}}", &row), &mut used);
-            let out = dir.join(format!("{stem}.pdf"));
-            let layout = DocumentLayout::build(&merged, 96.0, &mut fs);
-            layout.write_text_pdf(&mut fs, &out).unwrap();
-            let bytes = std::fs::read(&out).unwrap();
-            assert!(bytes.starts_with(b"%PDF"), "output is not a PDF");
-            assert!(bytes.len() > 1000, "PDF suspiciously small");
-        }
-        let count = std::fs::read_dir(&dir).unwrap().count();
-        std::fs::remove_dir_all(&dir).ok();
-        assert_eq!(count, 2, "expected one PDF per data row");
-    }
-
-    #[test]
     fn reads_xlsx_fixture_with_date_and_number() {
         // Verifies the calamine path end to end: headers, an integer amount
         // (no trailing .0) and an Excel serial date formatted dd/mm/yyyy.
@@ -721,16 +426,5 @@ mod tests {
         assert_eq!(row0.get("Số tiền"), Some("1500000"));
         assert_eq!(row0.get("Ngày ký"), Some("01/09/2026"));
         assert_eq!(t.row(1).unwrap().get("Ngày ký"), Some("25/12/2026"));
-    }
-
-    #[test]
-    fn newline_in_cell_collapses_to_space() {
-        let t = MergeTable {
-            headers: vec!["Địa chỉ".into()],
-            rows: vec![vec!["12 Lê Lợi\nQuận 1".into()]],
-        };
-        let doc = TextDocument::from_plain_text("Tại {{Địa chỉ}}.");
-        let merged = merge_document(&doc, &t.row(0).unwrap());
-        assert_eq!(merged.plain_text(), "Tại 12 Lê Lợi Quận 1.");
     }
 }

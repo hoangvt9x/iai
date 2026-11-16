@@ -570,12 +570,11 @@ impl App {
                 .map(|doc| self.shell.ui_data_cache.doc_thumbs.get(doc.id))
                 .collect::<Vec<_>>(),
         );
-        // A flowing-text document has no pixel preview (None).
         let doc_dims = std::sync::Arc::new(
             self.docs
                 .documents
                 .iter()
-                .map(|doc| (!doc.is_flow_text()).then_some((doc.canvas.width, doc.canvas.height)))
+                .map(|doc| Some((doc.canvas.width, doc.canvas.height)))
                 .collect::<Vec<_>>(),
         );
         let doc_ai_busy = self.doc_ai_busy();
@@ -920,19 +919,6 @@ impl App {
     ) -> DocumentViewModel {
         DocumentViewModel {
             id: self.docs.active().id,
-            kind: self.docs.active().kind,
-            flow_text: self
-                .docs
-                .active()
-                .flow_text
-                .as_ref()
-                .and_then(|text| text.document_arc().map(|document| (text, document)))
-                .map(|(text, document)| crate::ui::FlowTextViewModel {
-                    document,
-                    revision: text.revision(),
-                    active_page: text.active_page(),
-                    page_count: text.page_count(),
-                }),
             canvas_w: self.docs.active().canvas.width,
             canvas_h: self.docs.active().canvas.height,
             canvas_dpi: self.docs.active().canvas.metadata.resolution_ppi,
@@ -971,28 +957,14 @@ impl App {
                 .current_file()
                 .and_then(|p| p.to_str())
                 .map(|s| s.to_string()),
-            is_modified: self.is_modified() || {
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                {
-                    self.document_webview_active_is_dirty()
-                }
-                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
-                {
-                    false
-                }
-            },
+            is_modified: self.is_modified(),
             has_doc: !self.has_only_welcome_placeholder(),
             doc_ids: std::sync::Arc::new(self.docs.documents.iter().map(|doc| doc.id).collect()),
             active_artboard: self
                 .docs
                 .documents
                 .get(self.docs.active_doc_idx)
-                .map(|doc| {
-                    doc.flow_text.as_ref().map_or_else(
-                        || doc.active_artboard.min(doc.page_count().saturating_sub(1)),
-                        |text| text.active_page(),
-                    )
-                })
+                .map(|doc| doc.active_artboard.min(doc.page_count().saturating_sub(1)))
                 .unwrap_or(0),
             page_count: self
                 .docs
@@ -1081,21 +1053,7 @@ impl App {
                 self.docs
                     .documents
                     .iter()
-                    .map(|d| {
-                        d.is_modified() || {
-                            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                            {
-                                self.document_webview_document_is_dirty(d.id)
-                            }
-                            #[cfg(not(all(
-                                target_os = "windows",
-                                feature = "canvas-editor-webview"
-                            )))]
-                            {
-                                false
-                            }
-                        }
-                    })
+                    .map(|d| d.is_modified())
                     .collect(),
             ),
             doc_ai_busy,
@@ -1574,6 +1532,14 @@ impl App {
             pen_closed: self.edit.tools.active_id() == crate::tools::ToolId::Pen
                 && self.edit.tools.pen().is_closed(),
             crop_cursor_hint: self.crop_cursor_hint(),
+            grid_warp: self.edit.grid_warp.as_ref().map(|s| {
+                use crate::core::grid_warp::{ANCHORS, HANDLES, grid_lines};
+                crate::ui::GridWarpView {
+                    lines: grid_lines(&s.net, 32),
+                    anchors: ANCHORS.map(|i| s.net[i]),
+                    handles: HANDLES.map(|(h, a)| (s.net[h], s.net[a])),
+                }
+            }),
             transform_overlay: self
                 .edit
                 .transform_state
@@ -1887,30 +1853,6 @@ impl App {
             pdf_export_scope: self.shell.ui.pdf_export_scope,
             pdf_export_range: self.shell.ui.pdf_export_range.clone(),
             pdf_export_dpi: self.shell.ui.pdf_export_dpi,
-            mail_merge: self.shell.ui.mail_merge.as_ref().map(|session| {
-                let pattern = &self.shell.ui.mail_merge_pattern;
-                let filename_preview = session
-                    .table
-                    .row(0)
-                    .map(|row| {
-                        let stem = crate::core::mail_merge::expand_filename(pattern, &row);
-                        let stem = if stem.is_empty() {
-                            "hop-dong-001".to_string()
-                        } else {
-                            stem
-                        };
-                        format!("{stem}.pdf")
-                    })
-                    .unwrap_or_default();
-                crate::ui::MailMergeViewModel {
-                    data_file: session.data_file.clone(),
-                    row_count: session.table.row_count(),
-                    matched: session.matched.clone(),
-                    missing: session.missing.clone(),
-                    filename_pattern: pattern.clone(),
-                    filename_preview,
-                }
-            }),
             show_export_dialog: self.shell.ui.show_export_dialog,
             show_preferences: self.shell.ui.show_preferences,
             show_adjustment_dialog: self.shell.ui.show_adjustment_dialog,
@@ -1926,6 +1868,7 @@ impl App {
                 .unwrap_or_else(|| std::sync::Arc::new([[0; 256]; 4])),
             show_warp_dialog: self.shell.ui.show_warp_dialog,
             warp_params: self.shell.ui.warp_params,
+            warp_size_max: self.warp_size_max(),
             warp_resizing: self.edit.input.warp_resizing,
             warp_resize_anchor: {
                 // Physical px → egui points (egui ppp == window scale factor here).
@@ -1942,8 +1885,14 @@ impl App {
                 )
             },
             warp_freeze: self.edit.warp_state.as_ref().and_then(|s| {
-                s.mesh.freeze_alpha().map(|(gw, gh, alpha)| {
+                let rev = s.mesh.freeze_rev;
+                let mut kept = s.freeze_view.borrow_mut();
+                if let Some(view) = kept.as_ref().filter(|v| v.rev == rev) {
+                    return Some(view.clone());
+                }
+                let view = s.mesh.freeze_alpha().map(|(gw, gh, alpha)| {
                     std::sync::Arc::new(crate::ui::WarpFreezeView {
+                        rev,
                         gw,
                         gh,
                         alpha,
@@ -1952,7 +1901,9 @@ impl App {
                         layer_w: s.layer_w as f32,
                         layer_h: s.layer_h as f32,
                     })
-                })
+                });
+                kept.clone_from(&view);
+                view
             }),
             show_filter_dialog: self.shell.ui.show_filter_dialog,
             filter_dialog: self.shell.ui.filter_dialog,
@@ -1977,7 +1928,6 @@ impl App {
             lama_status_msg: crate::core::lama::status_text().unwrap_or_default(),
             show_exit_dialog: self.shell.ui.show_exit_dialog,
             show_close_dialog: self.shell.ui.show_close_dialog,
-            document_editor_error: self.shell.ui.document_editor_error.clone(),
             save_error: self.shell.ui.save_error.clone(),
             show_reload_file_dialog: self.jobs.pending_reload_prompt.is_some(),
             reload_file_name: self

@@ -100,6 +100,29 @@ impl App {
             self.shell.status_msg = "Ảnh này đang được xử lý, đợi xong rồi làm tiếp".to_string();
             return;
         }
+        // Warp on a grid is modal too: left-drag bends, Middle / Space pans,
+        // nothing else reaches a tool.
+        if self.edit.grid_warp.is_some() {
+            match button {
+                MouseButton::Left if !self.edit.input.was_over_ui => {
+                    if self.edit.input.space_held {
+                        self.edit.input.space_dragging = pressed;
+                        self.sync_cursor(event_loop);
+                    } else if pressed {
+                        self.grid_warp_pointer_down();
+                    } else {
+                        self.grid_warp_pointer_up();
+                    }
+                }
+                MouseButton::Left => self.grid_warp_pointer_up(),
+                MouseButton::Middle => {
+                    self.edit.input.mid_dragging = pressed;
+                    self.sync_cursor(event_loop);
+                }
+                _ => {}
+            }
+            return;
+        }
         // Warp is modal: route left-drag to the warp brush, keep Middle /
         // Space pan working, and swallow everything else (no tool dispatch).
         if self.edit.warp_state.is_some() {
@@ -1185,13 +1208,20 @@ impl App {
             return;
         }
 
+        if self.grid_warp_dragging() && !self.edit.input.space_dragging {
+            self.grid_warp_pointer_drag();
+            self.edit.input.last_mouse_x = position.x;
+            self.edit.input.last_mouse_y = position.y;
+            return;
+        }
+
         // Warp: Alt+drag resizes the brush; a normal drag warps; hovering /
         // panning falls through so the OS cursor + pan still work.
         if self.edit.warp_state.is_some() {
             if self.edit.input.warp_resizing {
                 let delta = self.edit.input.mouse_x - self.edit.input.alt_drag_start_x;
                 let new_size = (self.edit.input.alt_drag_start_size + delta / self.edit.view.zoom)
-                    .clamp(10.0, 1000.0);
+                    .clamp(10.0, self.warp_size_max());
                 self.shell.ui.warp_params.size = new_size;
                 self.edit.input.last_mouse_x = position.x;
                 self.edit.input.last_mouse_y = position.y;

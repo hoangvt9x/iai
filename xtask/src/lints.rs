@@ -36,9 +36,10 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     // A build with less in it has fewer of everything: lowered from there,
     // the budget would fail the build as shipped.
     if update && !as_shipped(&cargo_args) {
-        return Err(format!(
-            "--update counts the build as shipped: cargo xtask lints --update {SHIPPED}"
-        ));
+        return Err(
+            "--update counts the build as shipped: cargo xtask lints --update (no other arguments)"
+                .to_string(),
+        );
     }
 
     let path = budget_path()?;
@@ -150,12 +151,10 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     }
 }
 
-/// The features of the build as shipped, on top of the default ones.
-const SHIPPED: &str = "--features iai/canvas-editor-webview";
-
+/// The build as shipped is the default one: no arguments for cargo clippy
+/// (16/11: the text editor's feature, the only one added, was taken out).
 fn as_shipped(cargo_args: &[&String]) -> bool {
-    cargo_args.iter().map(|a| a.as_str()).collect::<Vec<_>>()
-        == SHIPPED.split(' ').collect::<Vec<_>>()
+    cargo_args.is_empty()
 }
 
 fn budget_path() -> Result<PathBuf, String> {
@@ -253,16 +252,10 @@ mod tests {
     #[test]
     fn only_the_build_as_shipped_may_lower_the_budget() {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let shipped = args(&["--features", "iai/canvas-editor-webview"]);
-        assert!(as_shipped(&shipped.iter().collect::<Vec<_>>()));
+        assert!(as_shipped(&[]));
         for other in [
-            args(&[]),
             args(&["--no-default-features"]),
-            args(&[
-                "--features",
-                "iai/canvas-editor-webview",
-                "--no-default-features",
-            ]),
+            args(&["--features", "iai/dev-tools"]),
         ] {
             assert!(!as_shipped(&other.iter().collect::<Vec<_>>()), "{other:?}");
         }

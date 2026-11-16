@@ -91,13 +91,6 @@ impl Session<'_> {
 
 /// Whether the shown page of `doc` holds pixels a command can work on.
 fn editable(doc: &Document) -> Result<(), CmdError> {
-    if doc.is_flow_text() {
-        return Err(CmdError::new(
-            ErrorCode::NotEnabled,
-            "this is a text document; it has no layers",
-        )
-        .vi("Đây là tài liệu văn bản, không có layer"));
-    }
     if doc.deferred_raw {
         return Err(CmdError::new(
             ErrorCode::NotEnabled,

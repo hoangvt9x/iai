@@ -210,9 +210,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     if data.dialogs.show_pdf_export_dialog {
         pdf_export_dialog(ctx, data, actions);
     }
-    if data.dialogs.mail_merge.is_some() {
-        mail_merge_dialog(ctx, data, actions);
-    }
     if data.dialogs.show_export_dialog {
         export_dialog(ctx, data, actions);
     }
@@ -254,9 +251,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     }
     if data.dialogs.show_close_dialog && !save_failed {
         close_dialog(ctx, data, actions);
-    }
-    if data.dialogs.document_editor_error.is_some() {
-        document_editor_error_dialog(ctx, data, actions);
     }
     if save_failed {
         save_error_dialog(ctx, data, actions);

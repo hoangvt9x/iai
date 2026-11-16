@@ -1,4 +1,3 @@
-pub(crate) mod mail_merge;
 mod open;
 mod pdf_session;
 pub(crate) mod save_export;

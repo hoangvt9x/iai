@@ -133,7 +133,7 @@ fn run_one(
 }
 
 /// Documents worth hunting on, the first shown: a photo with two layers and
-/// a selection; a document of three pages; a text document.
+/// a selection; a document of three pages.
 pub fn hunting_ground(ws: &mut dyn Workspace) {
     let id = ws.new_document_id();
     let mut doc = Document::new(id, 64, 48);
@@ -145,8 +145,6 @@ pub fn hunting_ground(ws: &mut dyn Workspace) {
     pages.add_blank_page();
     pages.add_blank_page();
     ws.add(pages);
-    let id = ws.new_document_id();
-    ws.add(Document::new_flow_text(id));
     ws.set_active(0);
 }
 

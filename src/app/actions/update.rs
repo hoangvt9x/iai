@@ -355,7 +355,7 @@ mod tests {
         assert!(!app.is_blocking_modal());
 
         // The title bar's buttons are refused over work a tool has under way.
-        app.shell.ui.document_editor_error = Some("held".to_string());
+        app.edit.input.painting = true;
         assert!(app.exit_blocking_operation().is_some());
         frame(&mut app, &Status::Available(release()), |a| {
             a.chrome.open_support = Some(SupportDialog::Support);

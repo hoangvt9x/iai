@@ -644,28 +644,9 @@ impl App {
         if actions.doc.exit_save_current {
             self.shell.ui.show_exit_dialog = false;
             self.do_save_project();
-            let webview_persistence_pending = {
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                {
-                    self.document_webview_save_is_pending()
-                }
-                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
-                {
-                    false
-                }
-            };
-            if webview_persistence_pending || self.jobs.pending_file_dialog.is_some() {
+            if self.jobs.pending_file_dialog.is_some() {
                 self.shell.exit_save_pending = true;
-            } else if !self.docs.active().is_modified() && {
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                {
-                    !self.document_webview_active_is_dirty()
-                }
-                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
-                {
-                    true
-                }
-            } {
+            } else if !self.docs.active().is_modified() {
                 self.close_answered_exit_document();
             } else {
                 // A synchronous write failed; keep this tab in the sweep.
@@ -679,9 +660,6 @@ impl App {
         }
         if let Some(v) = actions.dialogs.show_close_dialog.take() {
             self.shell.ui.show_close_dialog = v;
-        }
-        if std::mem::take(&mut actions.dialogs.dismiss_document_editor_error) {
-            self.shell.ui.document_editor_error = None;
         }
         if std::mem::take(&mut actions.dialogs.dismiss_save_error) {
             self.shell.ui.save_error = None;
@@ -733,31 +711,12 @@ impl App {
                 actions.doc.save_project = false;
                 self.do_save_project();
             }
-            let webview_persistence_pending = {
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                {
-                    self.document_webview_save_is_pending()
-                }
-                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
-                {
-                    false
-                }
-            };
-            let persistence_dirty = self.docs.active().is_modified() || {
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                {
-                    self.document_webview_active_is_dirty()
-                }
-                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
-                {
-                    false
-                }
-            };
-            if webview_persistence_pending || self.jobs.pending_file_dialog.is_some() {
+            let persistence_dirty = self.docs.active().is_modified();
+            if self.jobs.pending_file_dialog.is_some() {
                 self.shell.close_requested = true;
             } else if save_before_close && persistence_dirty {
-                // A synchronous save failed (or Canvas Editor could not start
-                // its snapshot). Keep the tab and let the user retry/discard.
+                // A synchronous save failed. Keep the tab and let the user
+                // retry/discard.
                 self.shell.ui.show_close_dialog = true;
             } else {
                 self.execute_close();

@@ -16,7 +16,6 @@ pub mod color_picker;
 pub mod design_tools;
 pub mod develop;
 pub mod dialogs;
-pub mod document_mode;
 pub mod intent;
 pub mod library;
 pub mod menubar;
@@ -76,11 +75,7 @@ fn canvas_path_overlay_layer() -> egui::LayerId {
 
 /// How thick the rulers are: none unless they are shown on a canvas.
 fn ruler_size(data: &UiData) -> f32 {
-    if data.chrome.show_rulers && data.doc.kind == crate::core::document::DocumentKind::Canvas {
-        20.0
-    } else {
-        0.0
-    }
+    if data.chrome.show_rulers { 20.0 } else { 0.0 }
 }
 
 /// Where the canvas begins: below the menu row, the options bar, the tabs
@@ -285,9 +280,19 @@ pub struct PathDisplayTile {
     pub height: u32,
 }
 
+/// Warp on a grid, as drawn: the patch's edges and lines at thirds, the
+/// four corners, and each handle with its corner (canvas space).
+pub struct GridWarpView {
+    pub lines: Vec<Vec<(f32, f32)>>,
+    pub anchors: [(f32, f32); 4],
+    pub handles: [((f32, f32), (f32, f32)); 8],
+}
+
 /// Warp freeze-mask snapshot for the red canvas overlay. `alpha` is the mesh
 /// node grid (`gw × gh`, 0..255); the panel scales it over the layer's canvas rect.
 pub struct WarpFreezeView {
+    /// The mask's number ([`crate::core::warp::WarpMesh::freeze_rev`]).
+    pub rev: u64,
     pub gw: usize,
     pub gh: usize,
     pub alpha: Vec<u8>,
@@ -1091,7 +1096,7 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
 
         toolbar::build(ctx, data, &mut actions);
 
-        if data.chrome.show_rulers && data.doc.kind == crate::core::document::DocumentKind::Canvas {
+        if data.chrome.show_rulers {
             draw_rulers(ctx, data, &mut actions);
         }
 
@@ -1125,18 +1130,6 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
                 ),
             )
         };
-
-        if data.doc.kind == crate::core::document::DocumentKind::FlowText {
-            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-            {
-                actions.chrome.document_webview_rect = Some(ctx.available_rect());
-            }
-            // Keep rendering the legacy editor underneath the child WebView. It is
-            // the immediate fallback when the Cargo feature is disabled or when
-            // WebView2 cannot be created on this machine.
-            document_mode::build(ctx, data, &mut actions, ctx.available_rect());
-            return;
-        }
 
         if let (true, Some(tex_id)) = (data.sel.show_refine_panel, data.sel.refine_overlay_tex) {
             let canvas_rect = egui::Rect::from_min_size(
@@ -1227,7 +1220,8 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
         }
 
         draw_transform_overlay(ctx, data, canvas_viewport);
-        draw_smart_select_cursor(ctx, data);
+        draw_grid_warp(ctx, data, canvas_viewport);
+        draw_smart_select_cursor(ctx, data, canvas_viewport);
         draw_clone_source_hints(ctx, data, canvas_viewport);
         draw_transform_context_menu(ctx, data, &mut actions);
         draw_powerclip_edit_bar(ctx, data, &mut actions);
@@ -3006,9 +3000,61 @@ fn draw_transform_overlay(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: eg
     }
 }
 
-fn draw_smart_select_cursor(ctx: &mut egui::Ui, data: &UiData) {
+/// Warp on a grid: the grid, the handles on their arms, the corners.
+fn draw_grid_warp(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect) {
+    let Some(view) = data.tool.grid_warp.as_ref() else {
+        return;
+    };
+    let (zoom, ox, oy) = (data.doc.zoom, data.doc.offset_x, data.doc.offset_y);
+    let cs = |p: (f32, f32)| egui::pos2(p.0 * zoom + ox, p.1 * zoom + oy);
+    let painter = ctx
+        .layer_painter(egui::LayerId::new(
+            CANVAS_TOOL_OVERLAY_ORDER,
+            egui::Id::new("grid_warp_overlay"),
+        ))
+        .with_clip_rect(canvas_viewport);
+    // A dark line under a light one: seen on light and dark pictures alike.
+    let under = egui::Stroke::new(2.0_f32, egui::Color32::from_black_alpha(110));
+    let over = egui::Stroke::new(
+        1.0_f32,
+        egui::Color32::from_rgba_unmultiplied(235, 240, 255, 230),
+    );
+    for line in &view.lines {
+        let points: Vec<egui::Pos2> = line.iter().map(|&p| cs(p)).collect();
+        painter.add(egui::Shape::line(points.clone(), under));
+        painter.add(egui::Shape::line(points, over));
+    }
+    let arm = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(90, 160, 255));
+    let fill = egui::Color32::from_rgba_unmultiplied(240, 240, 255, 240);
+    let border = egui::Stroke::new(
+        1.0_f32,
+        egui::Color32::from_rgba_unmultiplied(60, 60, 80, 230),
+    );
+    for &(handle, anchor) in &view.handles {
+        painter.line_segment([cs(anchor), cs(handle)], arm);
+        painter.circle(cs(handle), 3.5, fill, border);
+    }
+    for &anchor in &view.anchors {
+        painter.rect(
+            egui::Rect::from_center_size(cs(anchor), egui::vec2(8.0, 8.0)),
+            0.0,
+            fill,
+            border,
+            egui::StrokeKind::Middle,
+        );
+    }
+}
+
+fn draw_smart_select_cursor(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect) {
+    // Only over the canvas itself: not over the panels, toolbars and menus
+    // around it, nor a window or popup floating on it (16/11: the red
+    // +/- followed the pointer onto the Layers panel and the menu bar).
     if data.tool.active_tool == ToolId::SmartSelect
         && let Some(cursor_pos) = ctx.pointer_hover_pos()
+        && canvas_viewport.contains(cursor_pos)
+        && !ctx
+            .layer_id_at(cursor_pos)
+            .is_some_and(|l| l.order != egui::Order::Background)
     {
         let (shift_held, alt_held) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));
         // Modifiers win; otherwise the tool's own mode (Add after the

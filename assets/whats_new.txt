@@ -2,6 +2,14 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+16/11/2026
+- Ctrl+T, bấm chuột phải ▸ Warp: nay có lưới 3×3 như Photoshop. Kéo 4 góc, kéo tay nắm xanh cạnh mỗi góc, hoặc kéo bất kỳ chỗ nào trong lưới để uốn ảnh; Ctrl+Z lùi từng lần kéo, Enter (hoặc dấu ✓) áp dụng, Esc hủy.
+- Warp (cả Ctrl+T ▸ Warp lẫn Filter ▸ Warp) kéo mượt hơn hẳn, kể cả ảnh lớn: lúc đang kéo app vẽ nhanh phần ảnh vừa đổi, nhả chuột mới vẽ mịn.
+- Filter ▸ Warp: cỡ cọ nay lên được tới cạnh dài của ảnh (tối đa 15000 px), không còn dừng ở 1000.
+- Công cụ Smart Select: dấu + / − màu đỏ cạnh con trỏ chỉ hiện trên ảnh, không còn đè lên bảng Layer, thanh công cụ hay thanh menu.
+- «Xếp căn cước lên A4» không còn bỏ qua ảnh chụp màn hình căn cước điện tử (app VNeID): ảnh được xoay nằm ngang, mỗi ảnh một hàng, xen giữa các thẻ hai mặt theo thứ tự ảnh gửi.
+- Đã gỡ phần soạn thảo văn bản (Text ▸ «Tài liệu văn bản mới…») cho app nhẹ hơn. Tệp văn bản soạn bằng iAi trước đây không mở được nữa.
+
 15/11/2026
 - Mở ảnh RAW rồi chỉnh màu, bấm «Open Image»: ảnh vào canvas nhanh hơn rõ (trước đây app tính ảnh hai lần).
 - Bấm «Open Image» khi ảnh RAW chưa giải mã xong: app tự chờ rồi mở, không phải bấm lại.

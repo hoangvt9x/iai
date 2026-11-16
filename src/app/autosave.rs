@@ -327,10 +327,8 @@ pub(in crate::app) struct AutosaveJob {
 
 impl App {
     /// Periodically capture dirty documents. Images, PDF projects and artboard
-    /// documents are encoded one at a time on a worker, the active tab first;
-    /// Canvas Editor FlowText performs its asynchronous snapshot handshake and
-    /// will gain disk recovery with `.iai` v12. Throttled to the Preferences
-    /// period.
+    /// documents are encoded one at a time on a worker, the active tab first.
+    /// Throttled to the Preferences period.
     pub fn maybe_autosave(&mut self) {
         self.poll_autosave_job();
         // Preferences ▸ Files & Autosave can turn recovery off, or change the
@@ -358,7 +356,7 @@ impl App {
         {
             return;
         }
-        self.autosave_active_flow_text();
+        self.finish_autosave_sweep();
     }
 
     /// Every document has had its turn: start the next period.
@@ -373,6 +371,7 @@ impl App {
             || self.edit.transform_state.is_some()
             || self.edit.pending_transform_commit.is_some()
             || self.edit.warp_state.is_some()
+            || self.edit.grid_warp.is_some()
             || self.edit.text_edit.is_some()
             || self.edit.text_font_preview.is_some()
             || self.edit.show_refine_panel
@@ -386,27 +385,6 @@ impl App {
             || self.is_preview_dialog_open()
     }
 
-    /// The active tab's FlowText snapshot, which the Canvas Editor hands over by
-    /// itself; every other kind of document went through the background sweep.
-    fn autosave_active_flow_text(&mut self) {
-        let is_flow_text = self
-            .docs
-            .documents
-            .get(self.docs.active_doc_idx)
-            .is_some_and(|doc| doc.is_flow_text());
-        if is_flow_text {
-            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-            if self.document_webview_active_is_dirty()
-                && !self.request_document_webview_autosave_snapshot()
-            {
-                // The editor could not take the request yet; ask again shortly.
-                return;
-            }
-            // The legacy FlowText editor remains outside the recovery scope.
-        }
-        self.finish_autosave_sweep();
-    }
-
     /// Start mirroring the next open document whose content changed since it was
     /// last written, active tab first. Returns whether a write started.
     fn start_next_recovery_write(&mut self, dir: &Path) -> bool {
@@ -418,9 +396,6 @@ impl App {
             let Some(doc) = self.docs.documents.get(idx) else {
                 continue;
             };
-            if doc.is_flow_text() {
-                continue;
-            }
             let doc_id = doc.id;
             if self
                 .docs

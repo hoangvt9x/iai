@@ -59,7 +59,7 @@ impl DocThumbs {
     /// Queue a fresh preview of `doc` unless the resident one is current or one
     /// is already rendering. Returns `true` when work was queued.
     pub fn request(&mut self, doc: &Document) -> bool {
-        if doc.is_flow_text() || self.in_flight.contains_key(&doc.id) {
+        if self.in_flight.contains_key(&doc.id) {
             return false;
         }
         let key = content_key(doc);

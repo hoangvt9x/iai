@@ -26,7 +26,6 @@ iai-raster = { path = "../iai-raster" }
 iai-text = { path = "../iai-text" }
 iai-vector = { path = "../iai-vector" }
 base64 = "0.22"
-cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "sys-locale"] }
 image = "0.25"
 parking_lot = "0.12"
 rayon = "1"

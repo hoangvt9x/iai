@@ -77,15 +77,6 @@ impl App {
     /// document keeps the regular Save behavior and may overwrite its source
     /// PNG/JPEG/etc. An existing `.iai` project is always updated in place.
     pub fn do_save_project(&mut self) {
-        if self
-            .docs
-            .documents
-            .get(self.docs.active_doc_idx)
-            .is_some_and(|doc| doc.is_flow_text())
-        {
-            self.do_save_with(SaveWait::Finish);
-            return;
-        }
         let requires_project = self
             .docs
             .documents
@@ -124,31 +115,6 @@ impl App {
     }
 
     fn do_save_with(&mut self, wait: SaveWait) {
-        // Flowing text is an editable `.iai` document, never a flattened 1x1
-        // compatibility canvas. PDF remains an explicit export operation.
-        if self
-            .docs
-            .documents
-            .get(self.docs.active_doc_idx)
-            .is_some_and(|doc| doc.is_flow_text())
-        {
-            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-            if self.request_document_webview_save_snapshot(false) {
-                return;
-            }
-            let existing_iai = self.docs.current_file().map(Path::to_path_buf).filter(|p| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| e.eq_ignore_ascii_case("iai"))
-            });
-            match existing_iai {
-                Some(path) => {
-                    self.save_flow_text_doc_to(&path);
-                }
-                None => self.do_save_project_as(),
-            }
-            return;
-        }
         // Multi-page PDF sessions save as a full `.iai` project (all edited pages),
         // never as a flat single canvas — otherwise the other pages would be lost.
         if self
@@ -195,67 +161,7 @@ impl App {
     }
 
     pub fn do_save_as(&mut self) {
-        if self
-            .docs
-            .documents
-            .get(self.docs.active_doc_idx)
-            .is_some_and(|doc| doc.is_flow_text())
-        {
-            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-            if self.request_document_webview_save_snapshot(true) {
-                return;
-            }
-            self.do_save_project_as();
-            return;
-        }
         self.do_save_as_with_suggestion(self.docs.current_file().map(Path::to_path_buf));
-    }
-
-    /// Save the canonical flowing-text model. Layout pages, glyph caches and the
-    /// 1x1 compatibility canvas are derived/session state and are intentionally
-    /// excluded from the file.
-    pub fn save_flow_text_doc_to(&mut self, path: &std::path::Path) -> bool {
-        let idx = self.docs.active_doc_idx;
-        let result = self
-            .docs
-            .documents
-            .get(idx)
-            .and_then(|doc| doc.flow_text.as_ref())
-            .ok_or_else(|| "Không có tài liệu văn bản đang hoạt động".to_string())
-            .and_then(|flow| match flow.backing() {
-                crate::core::document::FlowTextBacking::Legacy(document) => {
-                    crate::formats::iai::write_flow_text_doc(path, document.as_ref())
-                }
-                crate::core::document::FlowTextBacking::CanvasEditor(document) => {
-                    crate::formats::iai::write_canvas_editor_doc(path, document)
-                }
-            });
-        match result {
-            Ok(()) => {
-                let (_document_id, _revision) = {
-                    let doc = &mut self.docs.documents[idx];
-                    doc.path = Some(path.to_path_buf());
-                    doc.file_modified_at = file_modified_at(path);
-                    doc.mark_saved();
-                    (
-                        doc.id,
-                        doc.flow_text.as_ref().map_or(0, |flow| flow.revision()),
-                    )
-                };
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                self.mark_document_webview_saved(_document_id, _revision);
-                self.shell.status_msg = format!(
-                    "Đã lưu văn bản: {}",
-                    path.file_name().unwrap_or_default().to_string_lossy()
-                );
-                self.clear_autosave(idx);
-                true
-            }
-            Err(error) => {
-                self.report_save_error(format!("Lỗi lưu văn bản: {error}"));
-                false
-            }
-        }
     }
 
     /// Save a multi-page artboard document as a full `.iai` (every page). Gathers
@@ -346,29 +252,13 @@ impl App {
 
     /// Save the active document to `path`. A single image is snapshotted and
     /// written on a worker; `wait` says whether to stay for the outcome. The
-    /// multi-page kinds and flowing text are written here and now either way.
+    /// multi-page kinds are written here and now either way.
     pub(in crate::app) fn save_to_with(&mut self, path: &std::path::Path, wait: SaveWait) {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        if self
-            .docs
-            .documents
-            .get(self.docs.active_doc_idx)
-            .is_some_and(|doc| doc.is_flow_text())
-        {
-            if ext == "iai" {
-                self.save_flow_text_doc_to(path);
-            } else {
-                self.report_save_error(
-                    "Văn bản chỉnh sửa chỉ lưu được dạng .iai; dùng Xuất PDF để tạo PDF"
-                        .to_string(),
-                );
-            }
-            return;
-        }
         if self.edit.text_edit.is_some() {
             self.commit_text_edit();
         }
@@ -867,18 +757,11 @@ impl App {
         use crate::ui::intent::PdfExportScope;
 
         let idx = self.docs.active_doc_idx;
-        let flow_text_active = self
-            .docs
-            .documents
-            .get(idx)
-            .is_some_and(|doc| doc.is_flow_text());
-        if !flow_text_active && self.edit.text_edit.is_some() {
+        if self.edit.text_edit.is_some() {
             self.commit_text_edit();
         }
-        if !flow_text_active {
-            self.sync_brush_gpu_to_cpu();
-        }
-        if !flow_text_active && idx < self.docs.documents.len() {
+        self.sync_brush_gpu_to_cpu();
+        if idx < self.docs.documents.len() {
             self.docs.documents[idx].reconcile_pdf_page_modified();
         }
         let doc = self.docs.documents.get(idx)?;
@@ -909,8 +792,6 @@ impl App {
                     .iter()
                     .position(|&page| page == pdf.active_page)
                     .unwrap_or(0)
-            } else if let Some(flow) = doc.flow_text.as_ref() {
-                flow.active_page()
             } else {
                 doc.active_artboard.min(page_count.saturating_sub(1))
             };
@@ -949,11 +830,7 @@ impl App {
             .or(self.docs.current_file())
             .and_then(|p| p.file_stem())
             .and_then(|s| s.to_str())
-            .unwrap_or(if flow_text_active {
-                "tai-lieu"
-            } else {
-                "document"
-            })
+            .unwrap_or("document")
             .to_string();
         Some((args, stem))
     }
@@ -1013,72 +890,6 @@ impl App {
         self.jobs.pending_pdf_export = None;
         if let Some(e) = error {
             self.report_save_error(crate::app::engine::error_line(e));
-        }
-    }
-
-    /// Pick a picture (native dialog on a worker thread) to insert into the
-    /// active flowing-text document. The decode happens off the UI thread; the
-    /// bytes reach the document editor via `poll_flow_text_image`.
-    pub fn pick_flow_text_image(&mut self) {
-        if self.jobs.pending_flow_image.is_some() {
-            return;
-        }
-        let Some(window) = self.win.window.as_ref() else {
-            return;
-        };
-        let parent = file_io::dialog_parent(window);
-        let job = crate::app::jobs::Job::spawn("flow-image", move || {
-            let mut dialog = rfd::FileDialog::new()
-                .add_filter(
-                    "Ảnh",
-                    &[
-                        "png", "jpg", "jpeg", "jfif", "jpe", "bmp", "gif", "tiff", "tif", "webp",
-                    ],
-                )
-                .set_title("Chèn ảnh");
-            if let Some(parent) = &parent {
-                dialog = dialog.set_parent(parent);
-            }
-            dialog.pick_file().and_then(|path| {
-                let (w, h) = image::image_dimensions(&path).ok()?;
-                let bytes = std::fs::read(&path).ok()?;
-                Some((bytes, w, h))
-            })
-        });
-        self.jobs.pending_flow_image = Some(job);
-        if let Some(window) = &self.win.window {
-            window.request_redraw();
-        }
-    }
-
-    /// Drain the image picker worker; hand a decoded picture to the document
-    /// editor for insertion at the caret.
-    pub(crate) fn poll_flow_text_image(&mut self) {
-        use crate::app::jobs::Polled;
-        let result = match self.jobs.pending_flow_image.as_ref() {
-            Some(job) => job.poll(),
-            None => return,
-        };
-        match result {
-            Polled::Done(Some((data, w, h))) => {
-                self.jobs.pending_flow_image = None;
-                crate::ui::document_mode::queue_image(data, w, h);
-                if let Some(window) = &self.win.window {
-                    window.request_redraw();
-                }
-            }
-            Polled::Done(None) => {
-                self.jobs.pending_flow_image = None; // dialog cancelled
-            }
-            Polled::Pending => {
-                if let Some(window) = &self.win.window {
-                    window.request_redraw();
-                }
-            }
-            Polled::Failed(why) => {
-                self.jobs.pending_flow_image = None;
-                self.shell.status_msg = format!("Chèn ảnh dừng ngoài dự kiến: {why}");
-            }
         }
     }
 }

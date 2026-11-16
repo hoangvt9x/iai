@@ -139,11 +139,15 @@ impl App {
         actions: &mut UiActions,
         event_loop: &ActiveEventLoop,
     ) {
-        if actions.tool.transform_cancel {
+        if actions.tool.transform_cancel && self.edit.grid_warp.is_some() {
+            self.cancel_grid_warp();
+        } else if actions.tool.transform_cancel {
             self.cancel_transform();
             self.sync_cursor(event_loop);
         }
-        if actions.tool.transform_commit {
+        if actions.tool.transform_commit && self.edit.grid_warp.is_some() {
+            self.commit_grid_warp();
+        } else if actions.tool.transform_commit {
             self.commit_transform();
             self.sync_cursor(event_loop);
         }

@@ -15,8 +15,6 @@ pub mod develop_window;
 pub mod doc_thumbs;
 pub mod docmgr;
 pub mod document_session;
-#[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-pub mod document_webview;
 pub mod editor_interaction;
 pub mod engine;
 #[cfg(feature = "pro")]
@@ -29,6 +27,7 @@ pub mod file_ops;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
 pub mod forms_errand;
+pub mod grid_warp;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
 pub mod id_photo_ops;

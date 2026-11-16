@@ -44,9 +44,6 @@ impl App {
         self.poll_file_dialog(event_loop);
         self.poll_pdf_export();
         self.poll_print_job();
-        self.poll_flow_text_image();
-        self.poll_mail_merge_data();
-        self.poll_mail_merge_export();
         self.poll_raw_drafts(event_loop);
         self.poll_raw_previews(event_loop);
         self.poll_loads();
@@ -61,6 +58,9 @@ impl App {
         self.enter_pending_develop(event_loop);
         self.poll_develop_bake_all();
         self.poll_reload_open_file();
+        // A warp's drags since the last frame, drawn once for this one.
+        self.grid_warp_flush();
+        self.warp_flush();
         self.poll_transform_commit();
         if !self.docs.crash_recovery_checked {
             self.docs.crash_recovery_checked = true;
@@ -159,8 +159,6 @@ impl App {
             .as_ref()
             .is_some_and(|window| super::window_is_minimized(window));
         if self.win.window_occluded || degenerate_size || minimized {
-            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-            self.hide_document_webview();
             self.win.rendering = false;
             return;
         }
@@ -201,8 +199,6 @@ impl App {
                 && !self.pro_jobs_running()
                 && self.jobs.pending_file_dialog.is_none()
                 && self.jobs.pending_pdf_export.is_none()
-                && self.jobs.pending_mail_merge_data.is_none()
-                && self.jobs.pending_mail_merge_export.is_none()
                 && self.jobs.pending_loads.is_empty()
                 && !crate::core::lama::is_downloading();
             self.win.ants_redraw_pending = false;
@@ -264,10 +260,6 @@ impl App {
                         &ui_data,
                     );
                 t_ui = Some(frame_t0.elapsed());
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                let document_webview_rect = actions.chrome.document_webview_rect;
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                let popup_open = self.win.egui_ctx.any_popup_open();
                 self.win.egui_repaint_deadline = if repaint_delay == std::time::Duration::MAX {
                     None
                 } else {
@@ -276,8 +268,6 @@ impl App {
                 self.win.ui_cursor_icon = cursor_icon;
                 self.apply_ui_actions(actions, event_loop);
                 t_actions = Some(frame_t0.elapsed());
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                self.sync_document_webview(&window, document_webview_rect, popup_open);
                 self.flush_pending_adjustment_preview();
 
                 // Hover/layer ownership is authoritative only after this UI

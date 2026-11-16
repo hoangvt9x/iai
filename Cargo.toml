@@ -33,7 +33,6 @@ pro = ["raw-dll", "dep:socket2", "dep:tungstenite", "iai-imaging/pro", "iai-ai/p
 # have it this way; a build without the feature links the library in.
 raw-dll = ["iai-formats/raw-dll"]
 jzazbz-prototype = []
-canvas-editor-webview = ["dep:wry"]
 dev-tools = []
 
 [[bin]]
@@ -41,8 +40,8 @@ name = "iai"
 path = "src/main.rs"
 
 # Development tools beside the app, built only when asked for
-# (`cargo run --release --features dev-tools --bin text_spike -- <dir>`), so a
-# release build links one program, not four.
+# (`cargo run --release --features dev-tools --bin color_probe -- <dir>`), so a
+# release build links one program, not three.
 [[bin]]
 name = "color_probe"
 path = "src/bin/color_probe.rs"
@@ -53,10 +52,6 @@ name = "raw_ids"
 path = "src/bin/raw_ids.rs"
 required-features = ["dev-tools"]
 
-[[bin]]
-name = "text_spike"
-path = "src/bin/text_spike.rs"
-required-features = ["dev-tools"]
 
 [dependencies]
 winit = { version = "0.30", features = ["rwh_06"] }
@@ -125,13 +120,6 @@ lyon_path = "1"
 lyon_tessellation = "1"
 unicode-normalization = "0.1"
 hmac-sha256 = "1.1.14"
-cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "sys-locale"] }
-# Mail-merge data sources: CSV and Excel (.xlsx/.xls). calamine is pure-Rust and
-# reuses quick-xml/zip/chrono already in the tree; `dates` formats Excel serial
-# dates via chrono for Vietnamese dd/mm/yyyy contract fields.
-csv = "1"
-calamine = { version = "0.26", features = ["dates"] }
-chrono = { version = "0.4", default-features = false, features = ["std"] }
 # Turns the symbol names the flight recorder's watcher reads out of the PDB
 # back into Rust paths. Already in the tree through std's backtrace support.
 rustc-demangle = "0.1"
@@ -146,7 +134,6 @@ qrcodegen = "1.8"
 # Win32_System_DataExchange reads the resolution an image on the clipboard
 # carries (src/app/os_clipboard.rs).
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
-wry = { version = "=0.56.1", optional = true }
 
 # Embeds the app icon into iai.exe (see build.rs) so Explorer and the Windows
 # taskbar show the iAi logo instead of the generic executable icon.

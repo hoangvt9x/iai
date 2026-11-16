@@ -79,6 +79,9 @@ pub struct EditorInteraction {
     pub(in crate::app) adjustment_layer_edit: Option<AdjustmentLayerEditState>,
     /// Active Warp session (Ctrl+Shift+X). None when not warping.
     pub(in crate::app) warp_state: Option<WarpState>,
+    /// Warp on a grid from Free Transform (right-click ▸ Warp). None when
+    /// not open.
+    pub(in crate::app) grid_warp: Option<crate::app::grid_warp::GridWarpState>,
     /// Active text-editing session (Text tool). See [`TextEditState`].
     pub(in crate::app) text_edit: Option<TextEditState>,
     /// Active Shape-handle drag (Shape tool). See [`ShapeDragState`].

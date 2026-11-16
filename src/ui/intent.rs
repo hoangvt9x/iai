@@ -76,36 +76,10 @@ fn parse_page_number(text: &str, page_count: usize) -> Result<usize, String> {
     Ok(number - 1)
 }
 
-/// A document object to focus from the flowing-text Layers panel.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum FlowTextFocus {
-    /// The text body (caret to the first text line).
-    Text,
-    /// The inline image at this 0-based ordinal among inline images.
-    Image(usize),
-    /// The floating image at this index in `floating_images`.
-    FloatingImage(usize),
-}
-
 /// File/document commands: open/save/export, undo/redo, resize, tabs,
 /// colour-mode conversion, view zoom, clipboard.
 #[derive(Default, PartialEq)]
 pub struct DocumentIntent {
-    /// Create a lightweight flowing-text document in a normal application tab.
-    pub new_flow_text_document: bool,
-    /// Replace canonical flowing-text content after an editor transaction.
-    pub replace_flow_text_document: Option<(
-        crate::core::document::DocumentId,
-        crate::core::text_document::TextDocument,
-    )>,
-    /// Derived layout/navigation state: `(doc id, page count, active page)`.
-    /// This never marks document content dirty.
-    pub set_flow_text_layout: Option<(crate::core::document::DocumentId, usize, usize)>,
-    /// Open a file picker to insert a picture into the active flowing-text doc.
-    pub pick_flow_text_image: bool,
-    /// Layers panel (flowing-text mode): focus a document object — the whole
-    /// text, or the image at this 0-based ordinal among images.
-    pub flow_text_focus: Option<FlowTextFocus>,
     pub fit_to_screen: bool,
     pub zoom_in: bool,
     pub zoom_out: bool,
@@ -167,12 +141,6 @@ pub struct DocumentIntent {
     pub set_pdf_export_range: Option<String>,
     pub set_pdf_export_dpi: Option<u32>,
     pub run_pdf_export: bool,
-    /// Mail merge (flowing-text docs): open the data-file picker to start a
-    /// batch merge; edit the filename pattern; run or cancel the batch.
-    pub start_mail_merge: bool,
-    pub set_mail_merge_pattern: Option<String>,
-    pub run_mail_merge: bool,
-    pub cancel_mail_merge: bool,
     pub reload_open_file_confirm: bool,
     pub reload_open_file_cancel: bool,
     /// PDF page-selection dialog: confirm with the 0-based page indices to open
@@ -773,8 +741,6 @@ pub struct DialogIntent {
     pub show_adjustment_dialog: Option<bool>,
     pub show_exit_dialog: Option<bool>,
     pub show_close_dialog: Option<bool>,
-    /// Acknowledge the Canvas Editor bridge/runtime error modal.
-    pub dismiss_document_editor_error: bool,
     /// Acknowledge the "could not save" modal.
     pub dismiss_save_error: bool,
     /// The New Canvas dialog's Save: name, width, height, unit, resolution.
@@ -870,9 +836,6 @@ pub struct ChromeIntent {
     pub window_minimize: bool,
     pub window_maximize_toggle: bool,
     pub window_drag: bool,
-    /// Logical egui bounds reserved for the optional child document WebView.
-    /// `None` leaves the legacy cosmic-text editor as the visible implementation.
-    pub document_webview_rect: Option<egui::Rect>,
 }
 /// What the person does in "Nhờ AI làm".
 #[cfg(feature = "pro")]

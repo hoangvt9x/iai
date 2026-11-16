@@ -5,10 +5,11 @@
 //! ([`crate::core::warp::WarpMesh`]) and the layer preview is rebuilt live.
 //! Apply commits one undoable tiles change; Cancel restores the original layer.
 //!
-//! v1 path favours correctness over speed: each dab warps only the brush rect of
-//! `working_flat` (cheap, local) but pushes the whole layer to the GPU via the
-//! proven `preview_layer_tiles` path. A region-only upload / GPU warp shader is a
-//! future optimisation for very large images.
+//! A dab only moves the mesh and notes the part of the layer it moved; once a
+//! frame that part is drawn again into `working_flat` (a draft as fine as the
+//! zoom shows while the pointer is down, finely when it lets go) and only its
+//! tiles go to the GPU (16/11: drawing and uploading at every mouse move
+//! lagged, the more so with a big brush).
 
 use super::render::CanvasEvent;
 use super::state::{App, WarpState};
@@ -67,6 +68,9 @@ impl App {
                 undo_stack: std::collections::VecDeque::new(),
                 stroke_snapshot: None,
                 stroke_dirty: false,
+                pending: None,
+                rough: None,
+                freeze_view: std::cell::RefCell::new(None),
             }
         };
 
@@ -78,6 +82,16 @@ impl App {
             w.request_redraw();
         }
         true
+    }
+
+    /// The biggest brush for the layer being warped.
+    pub(crate) fn warp_size_max(&self) -> f32 {
+        self.edit
+            .warp_state
+            .as_ref()
+            .map_or(crate::core::warp::BRUSH_MAX_FLOOR, |s| {
+                crate::core::warp::brush_max(s.layer_w, s.layer_h)
+            })
     }
 
     /// Index of the document this session is bound to (resolved by id, so a
@@ -146,6 +160,16 @@ impl App {
     pub(crate) fn warp_pointer_up(&mut self) {
         if let Some(state) = self.edit.warp_state.as_mut() {
             state.dragging = false;
+            // What the stroke drew as a draft is drawn finely next frame.
+            if let Some(rough) = state.rough.take() {
+                state.pending = Some(super::grid_warp::union(
+                    state.pending.unwrap_or((0, 0, 0, 0)),
+                    rough,
+                ));
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
             // Commit the stroke's pre-image to the undo stack, but only if the
             // stroke actually warped something — a bare click leaves no step.
             if let Some(snapshot) = state.stroke_snapshot.take()
@@ -179,6 +203,8 @@ impl App {
         state.mesh = prev_mesh;
         state.stroke_snapshot = None;
         state.stroke_dirty = false;
+        state.pending = None;
+        state.rough = None;
         let (lw, lh) = (state.layer_w, state.layer_h);
         state.mesh.warp_region_into(
             &state.original_flat,
@@ -199,7 +225,7 @@ impl App {
         let params = self.shell.ui.warp_params;
         let radius = (params.size * 0.5).max(1.0);
         let p = params.pressure;
-        let rect = {
+        {
             let Some(state) = self.edit.warp_state.as_mut() else {
                 return;
             };
@@ -218,33 +244,61 @@ impl App {
                 // count them as a stroke so Ctrl+Z can undo a freeze/thaw pass.
                 state.stroke_dirty = true;
                 // Mask brushes change no pixels; the red overlay refreshes on redraw.
-                None
             } else {
                 let (rx, ry, rw, rh) = state.mesh.dab_rect(lx, ly, radius);
-                if rw == 0 || rh == 0 {
-                    None
-                } else {
+                if rw > 0 && rh > 0 {
                     state.stroke_dirty = true;
-                    state.mesh.warp_region_into(
-                        &state.original_flat,
-                        &mut state.working_flat,
-                        rx,
-                        ry,
-                        rw,
-                        rh,
-                    );
-                    Some((rx, ry, rw, rh))
-                }
-            }
-        };
-        match rect {
-            Some((rx, ry, rw, rh)) => self.warp_push_region(rx, ry, rw, rh),
-            None => {
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
+                    // Drawn once this frame with the other dabs (`warp_flush`).
+                    state.pending = Some(super::grid_warp::union(
+                        state.pending.unwrap_or((0, 0, 0, 0)),
+                        (rx, ry, rx + rw, ry + rh),
+                    ));
                 }
             }
         }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Draw the part of the layer the dabs since the last frame moved, once
+    /// a frame: a draft while the stroke goes on, finely after.
+    pub(crate) fn warp_flush(&mut self) {
+        let step = crate::core::grid_warp::draft_step(self.edit.view.zoom);
+        let Some(state) = self.edit.warp_state.as_mut() else {
+            return;
+        };
+        let Some((x0, y0, x1, y1)) = state.pending.take() else {
+            return;
+        };
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        if state.dragging {
+            state.mesh.warp_region_draft_into(
+                &state.original_flat,
+                &mut state.working_flat,
+                x0,
+                y0,
+                x1 - x0,
+                y1 - y0,
+                step,
+            );
+            state.rough = Some(super::grid_warp::union(
+                state.rough.unwrap_or((0, 0, 0, 0)),
+                (x0, y0, x1, y1),
+            ));
+        } else {
+            state.mesh.warp_region_into(
+                &state.original_flat,
+                &mut state.working_flat,
+                x0,
+                y0,
+                x1 - x0,
+                y1 - y0,
+            );
+        }
+        self.warp_push_region(x0, y0, x1 - x0, y1 - y0);
     }
 
     /// Optimised live preview: write only the warped dab rect into the layer's live
@@ -293,7 +347,13 @@ impl App {
     /// coordinate spaces: Mode A uses canvas pixels, Mode B uses physical screen
     /// pixels. Keep the rect in the mode's native space so live Warp previews
     /// refresh the dab region instead of a shifted/clamped area.
-    fn warp_recomposite_canvas_rect(&mut self, cx0: f32, cy0: f32, cw: f32, ch: f32) {
+    pub(in crate::app) fn warp_recomposite_canvas_rect(
+        &mut self,
+        cx0: f32,
+        cy0: f32,
+        cw: f32,
+        ch: f32,
+    ) {
         self.sync_compositor_viewport();
         let canvas_space = self
             .win
@@ -361,9 +421,24 @@ impl App {
 
     /// Apply the warp: commit one undoable tiles change (original → warped).
     pub(crate) fn commit_warp(&mut self) {
-        let Some(state) = self.edit.warp_state.take() else {
+        let Some(mut state) = self.edit.warp_state.take() else {
             return;
         };
+        // What is still a draft, or not drawn yet, is drawn finely first.
+        let left = [state.pending.take(), state.rough.take()]
+            .into_iter()
+            .flatten()
+            .fold((0, 0, 0, 0), super::grid_warp::union);
+        if left.2 > left.0 && left.3 > left.1 {
+            state.mesh.warp_region_into(
+                &state.original_flat,
+                &mut state.working_flat,
+                left.0,
+                left.1,
+                left.2 - left.0,
+                left.3 - left.1,
+            );
+        }
         self.shell.ui.show_warp_dialog = false;
         let Some(doc_idx) = self.docs.index_of(state.doc_id) else {
             return;
@@ -419,7 +494,79 @@ impl App {
             state.undo_stack.push_back(state.mesh.clone());
         }
         state.mesh.clear();
+        state.pending = None;
+        state.rough = None;
         state.working_flat.copy_from_slice(&state.original_flat);
         self.warp_push_preview();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::state::App;
+
+    /// 16/11: dabs only note what they moved; it is drawn once a frame, a
+    /// draft while the stroke goes on and finely when it ends, and the
+    /// layer then holds exactly the fine warp.
+    #[test]
+    fn a_stroke_drawn_once_a_frame_ends_as_the_fine_warp() {
+        // Zoomed out (a sparse draft) and at 100 % (a draft of every pixel).
+        for zoom in [0.2, 1.0] {
+            stroke_at_zoom(zoom);
+        }
+    }
+
+    fn stroke_at_zoom(zoom: f32) {
+        let mut app: App = crate::app::grid_warp::tests::patterned_app();
+        app.edit.view.zoom = zoom;
+        assert!(app.begin_warp());
+        app.shell.ui.warp_params.size = 120.0;
+        let (x0, y0) = (300.0 + 200.0 * zoom, 300.0 + 150.0 * zoom);
+        app.edit.input.mouse_x = x0;
+        app.edit.input.mouse_y = y0;
+        app.warp_pointer_down();
+        for k in 1..=6 {
+            app.edit.input.mouse_x = x0 + 3.0 * k as f32;
+            app.edit.input.mouse_y = y0 + 1.0 * k as f32;
+            app.warp_pointer_drag();
+            if k % 2 == 0 {
+                app.warp_flush();
+            }
+        }
+        app.warp_flush();
+        assert!(app.edit.warp_state.as_ref().expect("open").rough.is_some());
+        app.warp_pointer_up();
+        app.warp_flush();
+        let state = app.edit.warp_state.as_ref().expect("open");
+        assert!(state.pending.is_none() && state.rough.is_none());
+        let mut fine = state.original_flat.clone();
+        state.mesh.warp_region_into(
+            &state.original_flat,
+            &mut fine,
+            0,
+            0,
+            state.layer_w as u32,
+            state.layer_h as u32,
+        );
+        assert!(state.mesh.touched);
+        let off: Vec<usize> = (0..fine.len() / 4)
+            .filter(|&i| state.working_flat[i * 4..i * 4 + 4] != fine[i * 4..i * 4 + 4])
+            .collect();
+        let w = state.layer_w;
+        assert!(
+            off.is_empty(),
+            "zoom {zoom}: {} pixels differ, first at {:?}, last at {:?}",
+            off.len(),
+            off.first().map(|i| (i % w, i / w)),
+            off.last().map(|i| (i % w, i / w))
+        );
+        let canvas = &app.docs.active().canvas;
+        let layer = &canvas.layer_stack.layers[canvas.layer_stack.active_idx];
+        assert!(
+            layer.tiles.flatten() == fine,
+            "the layer shows the fine warp"
+        );
+        app.commit_warp();
+        assert!(app.edit.warp_state.is_none());
     }
 }

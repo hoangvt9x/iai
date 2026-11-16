@@ -13,103 +13,30 @@ impl App {
         actions: &mut UiActions,
         event_loop: &ActiveEventLoop,
     ) -> bool {
-        if actions.doc.new_flow_text_document {
-            actions.doc.new_flow_text_document = false;
-            self.open_new_flow_text_doc_tab();
-        }
-        if actions.doc.pick_flow_text_image {
-            actions.doc.pick_flow_text_image = false;
-            self.pick_flow_text_image();
-        }
-        if actions.doc.start_mail_merge {
-            actions.doc.start_mail_merge = false;
-            self.start_mail_merge();
-        }
-        if let Some(focus) = actions.doc.flow_text_focus.take() {
-            let idx = self.docs.active_doc_idx;
-            if let Some(doc) = self.docs.documents.get(idx)
-                && doc.is_flow_text()
-            {
-                crate::ui::document_mode::request_focus(doc.id, focus);
-                if let Some(window) = &self.win.window {
-                    window.request_redraw();
-                }
-            }
-        }
-        if let Some(pattern) = actions.doc.set_mail_merge_pattern.take() {
-            self.shell.ui.mail_merge_pattern = pattern;
-        }
-        if actions.doc.run_mail_merge {
-            actions.doc.run_mail_merge = false;
-            self.run_mail_merge();
-        }
-        if actions.doc.cancel_mail_merge {
-            actions.doc.cancel_mail_merge = false;
-            self.cancel_mail_merge();
-        }
-        if let Some((doc_id, document)) = actions.doc.replace_flow_text_document.take()
-            && let Some(doc) = self.docs.by_id_mut(doc_id)
-            && let Some(text) = doc.flow_text.as_mut()
-        {
-            text.replace_document(document);
-        }
-        if let Some((doc_id, page_count, active_page)) = actions.doc.set_flow_text_layout.take()
-            && let Some(doc) = self.docs.by_id_mut(doc_id)
-            && let Some(text) = doc.flow_text.as_mut()
-        {
-            text.set_layout_page_count(page_count);
-            text.set_active_page(active_page);
-        }
-        let flow_text_active = self.docs.active().is_flow_text();
         if actions.doc.fit_to_screen {
-            if flow_text_active {
-                self.edit.view.zoom = 1.0;
-            } else {
-                self.fit_canvas_to_screen();
-            }
+            self.fit_canvas_to_screen();
         }
         if actions.doc.zoom_in {
-            let (min_zoom, max_zoom) = if flow_text_active {
-                (0.3, 4.0)
-            } else {
-                (0.02, 64.0)
-            };
-            self.edit.view.zoom = (self.edit.view.zoom * 1.25).clamp(min_zoom, max_zoom);
-            if !flow_text_active {
-                self.push_canvas_uniforms();
-                self.on_view_changed();
-            }
+            self.edit.view.zoom = (self.edit.view.zoom * 1.25).clamp(0.02, 64.0);
+            self.push_canvas_uniforms();
+            self.on_view_changed();
             self.win.last_cursor_radius = 0;
             self.sync_cursor(event_loop);
         }
         if actions.doc.zoom_out {
-            let (min_zoom, max_zoom) = if flow_text_active {
-                (0.3, 4.0)
-            } else {
-                (0.02, 64.0)
-            };
-            self.edit.view.zoom = (self.edit.view.zoom / 1.25).clamp(min_zoom, max_zoom);
-            if !flow_text_active {
-                self.push_canvas_uniforms();
-                self.on_view_changed();
-            }
+            self.edit.view.zoom = (self.edit.view.zoom / 1.25).clamp(0.02, 64.0);
+            self.push_canvas_uniforms();
+            self.on_view_changed();
             self.win.last_cursor_radius = 0;
             self.sync_cursor(event_loop);
         }
         if actions.doc.zoom_100 {
             self.edit.view.zoom = 1.0;
-            if !flow_text_active {
-                self.push_canvas_uniforms();
-                self.on_view_changed();
-            }
+            self.push_canvas_uniforms();
+            self.on_view_changed();
         }
         if let Some(i) = actions.doc.set_active_artboard.take() {
-            let active = self.docs.active_mut();
-            if let Some(text) = active.flow_text.as_mut() {
-                text.set_active_page(i);
-            } else {
-                self.set_active_artboard(i);
-            }
+            self.set_active_artboard(i);
         }
         if let Some(i) = actions.doc.rename_page.take() {
             self.begin_page_rename(i);

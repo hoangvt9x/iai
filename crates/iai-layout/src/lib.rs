@@ -1,5 +1,5 @@
-//! Page layout for iAi: mail merge (CSV / Excel data into document
-//! templates).
+//! Data for filling templates: CSV / Excel rows (the Pro pack's vector
+//! templates) and file names made from them.
 
 #![forbid(unsafe_code)]
 

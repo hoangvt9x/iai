@@ -11,10 +11,6 @@ use super::state::*;
 /// which is what makes device-lost recovery possible.
 pub struct WindowRuntime {
     pub(in crate::app) window: Option<Arc<Window>>,
-    #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-    pub(in crate::app) document_webview: Option<super::document_webview::DocumentWebView>,
-    #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-    pub(in crate::app) document_webview_failed: bool,
     pub(in crate::app) window_visible: bool,
     pub(in crate::app) window_focused: bool,
     pub(in crate::app) cursor_ownership: super::cursor::CursorOwnership,

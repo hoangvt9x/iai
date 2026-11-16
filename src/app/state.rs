@@ -161,9 +161,6 @@ pub struct UiState {
     pub pro_issued: Option<Result<crate::pro::issue::Issued, String>>,
     pub theme_mode: crate::ui::theme::ThemeMode,
     pub show_close_dialog: bool,
-    /// Latest Canvas Editor bridge/runtime failure. Kept as a modal until the
-    /// user acknowledges it so snapshot failures cannot be missed in status.
-    pub document_editor_error: Option<String>,
     /// Why the last save or export did not happen. A modal until acknowledged:
     /// in the status line alone it is too easily taken for "saved".
     pub save_error: Option<String>,
@@ -206,11 +203,6 @@ pub struct UiState {
     pub pdf_export_scope: crate::ui::intent::PdfExportScope,
     pub pdf_export_range: String,
     pub pdf_export_dpi: u32,
-    /// Mail merge: the active pre-export session (parsed data + field analysis),
-    /// present exactly while the mail-merge dialog is open; and the persistent
-    /// output filename pattern (`{{field}}` syntax).
-    pub mail_merge: Option<crate::app::file_ops::mail_merge::MailMergeSession>,
-    pub mail_merge_pattern: String,
     pub transform_interpolation: InterpolationMode,
     pub show_color_panel: bool,
     pub show_layer_panel: bool,
@@ -646,6 +638,15 @@ pub struct WarpState {
     pub stroke_snapshot: Option<crate::core::warp::WarpMesh>,
     /// Set by a dab that changed pixels or the freeze mask this stroke.
     pub stroke_dirty: bool,
+    /// The part of the layer the dabs since the last frame moved, drawn
+    /// once a frame (`x0, y0, x1, y1`, layer pixels, end exclusive).
+    pub pending: Option<(u32, u32, u32, u32)>,
+    /// The part drawn as a draft during the stroke, drawn finely when the
+    /// pointer lets go.
+    pub rough: Option<(u32, u32, u32, u32)>,
+    /// The freeze overlay last handed to the window, kept while the mask is
+    /// the same (it was built anew every frame: millions of nodes).
+    pub freeze_view: std::cell::RefCell<Option<std::sync::Arc<crate::ui::WarpFreezeView>>>,
 }
 
 /// Cached region proxies for the GPU Develop preview. BOTH the colour `region` base
@@ -1220,10 +1221,6 @@ impl App {
             },
             win: WindowRuntime {
                 window: None,
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                document_webview: None,
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                document_webview_failed: false,
                 window_visible: false,
                 window_focused: false,
                 cursor_ownership: super::cursor::CursorOwnership::default(),
@@ -1343,6 +1340,7 @@ impl App {
                 pending_opacity_cmd: None,
                 transform_state: None,
                 warp_state: None,
+                grid_warp: None,
                 adjustment_layer_edit: None,
                 text_edit: None,
                 shape_drag: None,
@@ -1400,9 +1398,6 @@ impl App {
             jobs: BackgroundJobs {
                 pending_file_dialog: None,
                 pending_pdf_export: None,
-                pending_flow_image: None,
-                pending_mail_merge_data: None,
-                pending_mail_merge_export: None,
                 pending_loads: Vec::new(),
                 pending_raw_previews: Vec::new(),
                 raw_preview_docs: std::collections::HashMap::new(),
@@ -1548,7 +1543,6 @@ impl App {
                     pro_issued: None,
                     theme_mode: crate::ui::theme::load_theme_mode(),
                     show_close_dialog: false,
-                    document_editor_error: None,
                     save_error: None,
                     show_feather_dialog: false,
                     show_modify_dialog: None,
@@ -1575,8 +1569,6 @@ impl App {
                     pdf_export_scope: crate::ui::intent::PdfExportScope::AllPages,
                     pdf_export_range: String::new(),
                     pdf_export_dpi: 0,
-                    mail_merge: None,
-                    mail_merge_pattern: String::new(),
                     transform_interpolation: InterpolationMode::Bilinear,
                     // Color & Brush is now a floating panel opened on demand
                     // (Window ▸ Color Panel), like the Levels dialog. Quick
@@ -2429,14 +2421,12 @@ impl App {
             || self.shell.ui.show_rename_dialog
             || self.shell.ui.page_rename_target.is_some()
             || self.shell.ui.show_pdf_export_dialog
-            || self.shell.ui.mail_merge.is_some()
             || self.shell.ui.show_export_dialog
             || self.shell.ui.show_preferences
             || self.shell.ui.show_exit_dialog
             || self.shell.ui.show_close_dialog
             || self.shell.ui.show_update_dialog
             || self.shell.ui.support_dialog.is_some()
-            || self.shell.ui.document_editor_error.is_some()
             || self.shell.ui.save_error.is_some()
             || self.jobs.pending_reload_prompt.is_some()
             || self.jobs.pending_pdf_prompt.is_some()
@@ -2470,6 +2460,7 @@ impl App {
         self.edit.transform_state.is_some()
             || self.edit.pending_transform_commit.is_some()
             || self.edit.warp_state.is_some()
+            || self.edit.grid_warp.is_some()
             || (self.edit.tools.active_id() == ToolId::Crop
                 && self.edit.tools.crop().has_selection())
     }
@@ -2560,9 +2551,6 @@ impl App {
     /// Plain tool selection is not enough to block exit; this is only for states
     /// with live edits, overlays, or modal previews that would otherwise be dropped.
     pub fn exit_blocking_operation(&self) -> Option<&'static str> {
-        if self.shell.ui.document_editor_error.is_some() {
-            return Some("the Canvas Editor error dialog");
-        }
         if self.jobs.pending_pdf_export.is_some() {
             return Some("PDF export");
         }
@@ -2582,7 +2570,7 @@ impl App {
         if self.edit.transform_state.is_some() || self.edit.pending_transform_commit.is_some() {
             return Some("Free Transform");
         }
-        if self.edit.warp_state.is_some() {
+        if self.edit.warp_state.is_some() || self.edit.grid_warp.is_some() {
             return Some("Warp");
         }
         if self.edit.show_refine_panel || self.shell.ui.show_refine_color_dialog {
@@ -2710,21 +2698,6 @@ impl App {
         self.path_style_commit();
         self.docs.active_mut().reconcile_pdf_page_modified();
 
-        #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-        if self.request_document_webview_exit_snapshot() {
-            return false;
-        }
-
-        self.continue_app_exit_after_webview_snapshot()
-    }
-
-    /// Finish the dirty-tab sweep after Canvas Editor has returned the active
-    /// document snapshot. Kept separate so the completion path does not request
-    /// a second snapshot and loop forever.
-    pub(crate) fn continue_app_exit_after_webview_snapshot(&mut self) -> bool {
-        #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-        let webview_dirty_ids = self.document_webview_dirty_document_ids();
-
         // Newest tab first: tabs open left to right, so the sweep unwinds them
         // right to left instead of jumping back to the oldest one.
         self.docs.pending_exit_docs = self
@@ -2732,18 +2705,7 @@ impl App {
             .documents
             .iter()
             .rev()
-            .filter(|document| {
-                document.is_modified() || {
-                    #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                    {
-                        webview_dirty_ids.contains(&document.id)
-                    }
-                    #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
-                    {
-                        false
-                    }
-                }
-            })
+            .filter(|document| document.is_modified())
             .map(|document| document.id)
             .collect();
         if self.docs.pending_exit_docs.is_empty() {
@@ -2760,24 +2722,11 @@ impl App {
                 self.docs.pending_exit_docs.pop_front();
                 continue;
             };
-            let webview_dirty = {
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                {
-                    self.document_webview_document_is_dirty(id)
-                }
-                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
-                {
-                    false
-                }
-            };
-            if !self.docs.documents[idx].is_modified() && !webview_dirty {
+            if !self.docs.documents[idx].is_modified() {
                 self.docs.pending_exit_docs.pop_front();
                 continue;
             }
             if idx != self.docs.active_doc_idx {
-                // The exit sweep starts only after the active Canvas Editor
-                // snapshot has completed. Re-entering the public switch gate
-                // here would request another snapshot and stall the dialog.
                 self.switch_to_doc_confirmed(idx);
             }
             self.shell.ui.show_exit_dialog = true;

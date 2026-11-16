@@ -15,17 +15,11 @@ impl App {
             self.shell.status_msg = "Wait for the PDF page to finish rendering".to_string();
             return;
         }
-        #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-        if self.request_document_webview_switch_snapshot(idx) {
-            return;
-        }
-
         self.switch_to_doc_confirmed(idx);
     }
 
-    /// Complete a tab switch whose asynchronous Canvas Editor snapshot has
-    /// already succeeded. This must not call `switch_to_doc`: doing so would
-    /// re-enter the snapshot gate and keep the switch pending forever.
+    /// Switch tabs once what holds the switch (a PDF page rendering) has
+    /// been checked.
     pub(crate) fn switch_to_doc_confirmed(&mut self, idx: usize) {
         if idx == self.docs.active_doc_idx || idx >= self.docs.documents.len() {
             return;
@@ -84,20 +78,6 @@ impl App {
     pub fn refresh_active_document(&mut self) {
         let idx = self.docs.active_doc_idx;
         self.touch_doc_mru();
-
-        if self.docs.documents[idx].is_flow_text() {
-            self.edit.view.zoom = self.docs.documents[idx].saved_zoom.max(0.3);
-            self.edit.view.offset_x = 0.0;
-            self.edit.view.offset_y = 0.0;
-            self.edit.transform_state = None;
-            self.edit.input.painting = false;
-            self.edit.pending_stroke_inputs.clear();
-            self.win.pending_gpu_sync = Default::default();
-            if let Some(window) = &self.win.window {
-                window.request_redraw();
-            }
-            return;
-        }
 
         if self.docs.documents[idx].saved_zoom <= 0.0 {
             self.edit.view.zoom = 1.0;
@@ -167,11 +147,6 @@ impl App {
             self.path_style_commit();
         }
 
-        #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-        if self.request_document_webview_close_snapshot(idx) {
-            return;
-        }
-
         if self.docs.documents[idx].is_modified() {
             self.docs.pending_close_doc_idx = Some(idx);
             self.shell.ui.show_close_dialog = true;
@@ -186,8 +161,6 @@ impl App {
     pub fn close_doc_confirmed(&mut self, idx: usize) {
         if self.docs.documents.len() == 1 {
             let id = self.docs.documents[idx].id;
-            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-            self.forget_document_webview_state(id);
             self.drop_doc_ai_jobs(id);
             self.docs.pdf_render_services.remove(&id);
             self.clear_autosave_for(id);
@@ -199,11 +172,6 @@ impl App {
             return;
         }
 
-        #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-        {
-            let removed_id = self.docs.documents[idx].id;
-            self.forget_document_webview_state(removed_id);
-        }
         let removed = self.docs.documents.remove(idx);
         self.forget_portrait_analysis(removed.id);
         self.drop_doc_ai_jobs(removed.id);
@@ -385,18 +353,6 @@ impl App {
         self.switch_to_doc(new_idx);
         self.shell.ui.show_welcome = false;
     }
-
-    /// Open a lightweight flowing-text document in the normal tab lifecycle.
-    /// Its 1x1 compatibility canvas is never the page backing; layout produces
-    /// derived text pages in the document viewport.
-    pub fn open_new_flow_text_doc_tab(&mut self) {
-        let id = DocumentId(self.docs.next_doc_id);
-        self.docs.next_doc_id += 1;
-        self.docs.documents.push(Document::new_flow_text(id));
-        let new_idx = self.docs.documents.len() - 1;
-        self.switch_to_doc(new_idx);
-        self.shell.ui.show_welcome = false;
-    }
 }
 
 #[cfg(test)]
@@ -412,27 +368,11 @@ mod tests {
     }
 
     #[test]
-    fn new_flow_text_document_uses_the_normal_tab_lifecycle() {
+    fn confirmed_switch_moves_directly_to_the_target() {
         let mut app = App::new();
-        let old_count = app.docs.documents.len();
-
-        app.open_new_flow_text_doc_tab();
-
-        assert_eq!(app.docs.documents.len(), old_count + 1);
-        assert_eq!(app.docs.active_doc_idx, old_count);
-        let doc = &app.docs.documents[old_count];
-        assert!(doc.is_flow_text());
-        assert_eq!((doc.canvas.width, doc.canvas.height), (1, 1));
-        assert!(doc.pages.is_empty());
-        assert!(!app.shell.ui.show_welcome);
-    }
-
-    #[test]
-    fn confirmed_switch_moves_directly_to_the_snapshotted_target() {
-        let mut app = App::new();
-        app.open_new_flow_text_doc_tab();
+        app.open_new_doc_tab();
         let first_flow_id = app.docs.active().id;
-        app.open_new_flow_text_doc_tab();
+        app.open_new_doc_tab();
         let second_flow_id = app.docs.active().id;
 
         let first_idx = app.docs.index_of(first_flow_id).unwrap();
@@ -450,9 +390,6 @@ mod tests {
 
         app.shell.ui.show_close_dialog = true;
 
-        // The WebView host uses is_modal_open() to hide its child HWND. Without
-        // this, the egui confirmation is rendered behind WebView2 and cannot be
-        // seen or clicked.
         assert!(app.is_blocking_modal());
         assert!(app.is_modal_open());
         // The confirmation itself must remain interactive; only unrelated
@@ -473,23 +410,8 @@ mod tests {
         // tenth of a second flashed the window at every page.
         assert!(!app.chrome_locked());
         // A real modal still greys them.
-        app.shell.ui.document_editor_error = Some("snapshot failed".to_string());
+        app.shell.ui.show_preferences = true;
         assert!(app.chrome_locked());
-    }
-
-    #[test]
-    fn document_editor_error_hides_the_webview_and_locks_other_actions() {
-        let mut app = App::new();
-        app.shell.ui.show_welcome = false;
-        app.shell.ui.document_editor_error = Some("snapshot failed".to_string());
-
-        assert!(app.is_blocking_modal());
-        assert!(app.is_modal_open());
-        assert!(app.modal_lock_active());
-        assert_eq!(
-            app.exit_blocking_operation(),
-            Some("the Canvas Editor error dialog")
-        );
     }
 
     #[test]

@@ -1,9 +1,8 @@
 # How many of each crash lint a crate may still have: `cargo xtask lints`
 # fails when a crate has more, or has any it is not listed with here.
 # The numbers only go down: after a cleanup, `cargo xtask lints --update`
-# lowers them. Counted on the build as shipped
-# (`cargo xtask lints --features iai/canvas-editor-webview`); test code is
-# not counted.
+# lowers them. Counted on the build as shipped (`cargo xtask lints`);
+# test code is not counted.
 #
 # crate lint count
 

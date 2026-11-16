@@ -104,40 +104,6 @@ impl App {
             }
             _ => {}
         }
-        // A flowing-text document gives editing keys to egui/cosmic-text. Keep
-        // only application-lifecycle shortcuts here; allowing the normal tool
-        // router to continue would nudge layers, switch tools or undo the dormant
-        // 1x1 compatibility canvas underneath the document surface.
-        if self.docs.active().is_flow_text() {
-            if pressed {
-                match self.custom_command_for(physical_key) {
-                    Some(Command::FileSave) => self.do_save(),
-                    Some(Command::FileOpen) => self.do_open(),
-                    Some(Command::FileClose) => self.close_doc(self.docs.active_doc_idx),
-                    Some(_) => {}
-                    None if self.edit.input.ctrl_held => match physical_key {
-                        PhysicalKey::Code(KeyCode::KeyS)
-                            if self.shell.keymap.is_default(Command::FileSave) =>
-                        {
-                            self.do_save()
-                        }
-                        PhysicalKey::Code(KeyCode::KeyO)
-                            if self.shell.keymap.is_default(Command::FileOpen) =>
-                        {
-                            self.do_open()
-                        }
-                        PhysicalKey::Code(KeyCode::KeyW)
-                            if self.shell.keymap.is_default(Command::FileClose) =>
-                        {
-                            self.close_doc(self.docs.active_doc_idx)
-                        }
-                        _ => {}
-                    },
-                    None => {}
-                }
-            }
-            return;
-        }
         let open_key = match self.custom_command_for(physical_key) {
             Some(cmd) => cmd == Command::FileOpen,
             None => {
@@ -822,6 +788,9 @@ impl App {
                 } else if self.edit.warp_state.is_some() {
                     self.cancel_warp();
                     self.sync_cursor(event_loop);
+                } else if self.edit.grid_warp.is_some() {
+                    self.cancel_grid_warp();
+                    self.sync_cursor(event_loop);
                 } else if self.edit.transform_state.is_some() {
                     self.cancel_transform();
                     self.sync_cursor(event_loop);
@@ -862,6 +831,9 @@ impl App {
             {
                 if self.edit.warp_state.is_some() {
                     self.commit_warp();
+                    self.sync_cursor(event_loop);
+                } else if self.edit.grid_warp.is_some() {
+                    self.commit_grid_warp();
                     self.sync_cursor(event_loop);
                 } else if self.edit.transform_state.is_some() {
                     self.commit_transform();
@@ -1072,7 +1044,7 @@ impl App {
         }
     }
 
-    fn redraw_main(&self) {
+    pub(in crate::app) fn redraw_main(&self) {
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -1534,6 +1506,9 @@ impl App {
                 if self.edit.warp_state.is_some() {
                     self.warp_undo_stroke();
                     self.redraw_main();
+                    return;
+                }
+                if self.grid_warp_undo() {
                     return;
                 }
                 if self.modal_lock_active() {

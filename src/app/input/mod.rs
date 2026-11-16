@@ -15,35 +15,14 @@ use winit::{
     window::{Window, WindowId},
 };
 
-fn flow_text_zoom_from_wheel(current: f32, vertical_delta: f64) -> f32 {
-    if vertical_delta == 0.0 {
-        return current;
-    }
-    let factor = if vertical_delta > 0.0 {
-        1.15_f32
-    } else {
-        1.0 / 1.15
-    };
-    (current * factor).clamp(0.3, 4.0)
-}
-
 fn is_close_document_shortcut(physical_key: &PhysicalKey, pressed: bool, ctrl_held: bool) -> bool {
     pressed && ctrl_held && matches!(physical_key, PhysicalKey::Code(KeyCode::KeyW))
 }
 
 #[cfg(test)]
-mod flow_text_zoom_tests {
-    use super::{flow_text_zoom_from_wheel, is_close_document_shortcut};
+mod close_shortcut_tests {
+    use super::is_close_document_shortcut;
     use winit::keyboard::{KeyCode, PhysicalKey};
-
-    #[test]
-    fn alt_wheel_zoom_has_stable_direction_and_bounds() {
-        assert!(flow_text_zoom_from_wheel(1.0, 1.0) > 1.0);
-        assert!(flow_text_zoom_from_wheel(1.0, -1.0) < 1.0);
-        assert_eq!(flow_text_zoom_from_wheel(4.0, 1.0), 4.0);
-        assert_eq!(flow_text_zoom_from_wheel(0.3, -1.0), 0.3);
-        assert_eq!(flow_text_zoom_from_wheel(1.0, 0.0), 1.0);
-    }
 
     #[test]
     fn ctrl_w_bypasses_egui_for_every_document_kind() {
@@ -205,7 +184,10 @@ impl App {
         // their anchors, geometry, handles and layers may legitimately sit off the
         // page — so they must keep receiving pointer events there too.
         // For these tools, only the surrounding chrome counts as UI.
+        // Warp on a grid too: its corners sit on the layer's edge, half of
+        // each one out on the pasteboard (16/11: they could not be taken).
         let pasteboard_ok = self.edit.transform_state.is_some()
+            || self.edit.grid_warp.is_some()
             || matches!(
                 self.edit.tools.active_id(),
                 ToolId::Brush
@@ -886,31 +868,6 @@ impl ApplicationHandler for App {
             }
         }
 
-        // Flowing-text zoom follows the same gesture as the canvas: Alt + wheel.
-        // Handle it before forwarding to egui so the wheel cannot also scroll the
-        // document in the same event.
-        if self
-            .docs
-            .documents
-            .get(self.docs.active_doc_idx)
-            .is_some_and(|doc| doc.is_flow_text())
-            && self.edit.input.alt_held
-            && let WindowEvent::MouseWheel { delta, .. } = &event
-        {
-            let sy = match delta {
-                MouseScrollDelta::LineDelta(_, y) => *y as f64,
-                MouseScrollDelta::PixelDelta(p) => p.y * 0.1,
-            };
-            if sy != 0.0 {
-                self.edit.view.zoom = flow_text_zoom_from_wheel(self.edit.view.zoom, sy);
-                self.docs.active_mut().saved_zoom = self.edit.view.zoom;
-                if let Some(window) = &self.win.window {
-                    window.request_redraw();
-                }
-            }
-            return;
-        }
-
         // egui-winit reports `repaint = true` for `RedrawRequested` itself, so
         // blindly forwarding that flag to `request_redraw()` below feeds an
         // unbreakable redraw loop: each frame schedules the next regardless of
@@ -1156,10 +1113,6 @@ impl ApplicationHandler for App {
 
             WindowEvent::Occluded(occluded) => {
                 self.win.window_occluded = occluded;
-                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
-                if occluded {
-                    self.hide_document_webview();
-                }
                 if !occluded {
                     self.win.egui_repaint_deadline = None;
                     if let Some(w) = &self.win.window {
@@ -1256,11 +1209,6 @@ impl ApplicationHandler for App {
                 if self.is_blocking_modal() {
                     return;
                 }
-                if self.docs.active().is_flow_text() {
-                    // Already queued into egui above; the document ScrollArea
-                    // owns wheel scrolling. Do not pan the dormant canvas.
-                    return;
-                }
                 if self.edit.input.alt_right_dragging {
                     return;
                 }
@@ -1319,15 +1267,11 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                if !self.docs.active().is_flow_text() {
-                    self.on_main_mouse_input(event_loop, state, button)
-                }
+                self.on_main_mouse_input(event_loop, state, button)
             }
 
             WindowEvent::CursorMoved { position, .. } => {
-                if !self.docs.active().is_flow_text() {
-                    self.on_main_cursor_moved(event_loop, position)
-                }
+                self.on_main_cursor_moved(event_loop, position)
             }
 
             WindowEvent::RedrawRequested => self.on_main_redraw(event_loop),

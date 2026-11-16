@@ -1,7 +1,6 @@
 //! PDF: the pages of a document, or of every open document, in one file.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use iai_canvas::canvas::Canvas;
 use iai_canvas::document::Document;
@@ -95,10 +94,6 @@ enum Source {
     /// Page canvases; with the count of documents they come from when every
     /// open document is combined.
     Pages(Vec<Canvas>, Option<usize>),
-    Text {
-        document: Arc<iai_doc::text_document::TextDocument>,
-        pages: Vec<usize>,
-    },
     Hybrid(Box<HybridSource>),
 }
 
@@ -279,9 +274,7 @@ impl Command for ExportPdf {
             let mut pages = Vec::new();
             let mut docs = 0usize;
             for doc in s.workspace().documents() {
-                // A flowing-text tab has no raster page to place; leave it out
-                // rather than inserting its 1×1 compatibility canvas.
-                if doc.is_flow_text() || doc.deferred_raw {
+                if doc.deferred_raw {
                     continue;
                 }
                 let before = pages.len();
@@ -305,16 +298,7 @@ impl Command for ExportPdf {
             if d.deferred_raw {
                 s.canvas(Some(doc))?;
             }
-            if let Some(flow) = &d.flow_text {
-                let document = flow.document_arc().ok_or_else(|| {
-                    not_enabled(
-                        "this text document is written to PDF from the app window",
-                        "Văn bản này được xuất PDF trong cửa sổ app",
-                    )
-                })?;
-                let pages = chosen(&p.pages, d.page_count())?;
-                Source::Text { document, pages }
-            } else if let Some(pdf) = &d.pdf_document {
+            if let Some(pdf) = &d.pdf_document {
                 let positions = chosen(&p.pages, pdf.selected_pages.len().max(1))?;
                 Source::Hybrid(Box::new(hybrid_source(d, &positions)?))
             } else {
@@ -339,7 +323,6 @@ impl Command for ExportPdf {
         let label_vi = match &source {
             Source::Pages(_, Some(docs)) => format!("Đang gộp {docs} tài liệu thành PDF"),
             Source::Pages(pages, None) => format!("Đang xuất PDF {} trang", pages.len()),
-            Source::Text { pages, .. } => format!("Đang xuất PDF văn bản {} trang", pages.len()),
             Source::Hybrid(h) => format!("Đang xuất PDF {} trang", h.snapshots.len()),
         };
         Ok(Plan::Job(Job {
@@ -354,7 +337,6 @@ impl Command for ExportPdf {
                     .unwrap_or_default();
                 let (count, kind) = match &source {
                     Source::Pages(pages, _) => (pages.len(), "raster"),
-                    Source::Text { pages, .. } => (pages.len(), "text"),
                     Source::Hybrid(h) => (h.snapshots.len(), "hybrid"),
                 };
                 if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -371,18 +353,6 @@ impl Command for ExportPdf {
                             }
                             None => format!("Đã xuất PDF {count} trang: {name}"),
                         }
-                    }
-                    Source::Text { document, pages } => {
-                        let mut fonts = cosmic_text::FontSystem::new();
-                        let layout = iai_text::text_layout::DocumentLayout::build(
-                            document.as_ref(),
-                            96.0,
-                            &mut fonts,
-                        );
-                        layout
-                            .write_text_pdf_pages(&mut fonts, &path, &pages)
-                            .map_err(fail)?;
-                        format!("Đã xuất PDF văn bản {count} trang: {name}")
                     }
                     Source::Hybrid(h) => {
                         let (bytes, counts) = hybrid_bytes(&h, dpi).map_err(fail)?;

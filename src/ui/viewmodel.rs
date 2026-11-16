@@ -8,33 +8,8 @@ use super::*;
 
 /// The active document as the UI sees it: geometry, colour mode, view,
 /// history counters, the tab strip and the PDF navigator.
-#[derive(Clone)]
-pub struct FlowTextViewModel {
-    pub document: std::sync::Arc<crate::core::text_document::TextDocument>,
-    pub revision: u64,
-    pub active_page: usize,
-    pub page_count: usize,
-}
-
-/// Read-only slice of the mail-merge session for its dialog.
-pub struct MailMergeViewModel {
-    /// Display name of the chosen data file.
-    pub data_file: String,
-    pub row_count: usize,
-    /// Template fields present in the data.
-    pub matched: Vec<String>,
-    /// Template fields with no matching column.
-    pub missing: Vec<String>,
-    /// Output filename pattern (`{{field}}` syntax).
-    pub filename_pattern: String,
-    /// The pattern applied to the first data row, shown as a live preview.
-    pub filename_preview: String,
-}
-
 pub struct DocumentViewModel {
     pub id: crate::core::document::DocumentId,
-    pub kind: crate::core::document::DocumentKind,
-    pub flow_text: Option<FlowTextViewModel>,
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub canvas_dpi: f32,
@@ -370,6 +345,8 @@ pub struct ToolViewModel {
     pub pen_closed: bool,
     pub crop_cursor_hint: u8,
     pub transform_overlay: Option<TransformOverlayData>,
+    /// Warp on a grid, while it is open: its lines and points (canvas space).
+    pub grid_warp: Option<GridWarpView>,
     pub transform_scale_x: f32,
     pub transform_scale_y: f32,
     pub transform_angle: f32,
@@ -570,9 +547,6 @@ pub struct DialogViewModel {
     pub pdf_export_scope: crate::ui::intent::PdfExportScope,
     pub pdf_export_range: String,
     pub pdf_export_dpi: u32,
-    /// Mail-merge dialog contents; `Some` exactly while the dialog is open, and
-    /// only ever set for a flowing-text document.
-    pub mail_merge: Option<MailMergeViewModel>,
     pub show_export_dialog: bool,
     pub show_preferences: bool,
     pub show_adjustment_dialog: bool,
@@ -583,6 +557,8 @@ pub struct DialogViewModel {
     pub levels_histogram: std::sync::Arc<[[u32; 256]; 4]>,
     pub show_warp_dialog: bool,
     pub warp_params: crate::core::warp::WarpParams,
+    /// The biggest Warp brush for the layer being warped.
+    pub warp_size_max: f32,
     pub warp_freeze: Option<std::sync::Arc<WarpFreezeView>>,
     /// True while Alt+right-dragging to resize the Warp brush. When set, the
     /// brush ring is pinned at `warp_resize_anchor` (egui points) instead of
@@ -601,8 +577,6 @@ pub struct DialogViewModel {
     pub lama_status_msg: String,
     pub show_exit_dialog: bool,
     pub show_close_dialog: bool,
-    /// Canvas Editor bridge/runtime error awaiting acknowledgement.
-    pub document_editor_error: Option<String>,
     /// Why the last save or export did not happen, awaiting acknowledgement.
     pub save_error: Option<String>,
     pub show_reload_file_dialog: bool,
@@ -1310,8 +1284,6 @@ impl Default for UiData {
         Self {
             doc: DocumentViewModel {
                 id: crate::core::document::DocumentId::NONE,
-                kind: crate::core::document::DocumentKind::Canvas,
-                flow_text: None,
                 canvas_w: 800,
                 canvas_h: 600,
                 canvas_dpi: 72.0,
@@ -1528,6 +1500,7 @@ impl Default for UiData {
                 pen_closed: false,
                 crop_cursor_hint: 0,
                 transform_overlay: None,
+                grid_warp: None,
                 transform_scale_x: 1.0,
                 transform_scale_y: 1.0,
                 transform_angle: 0.0,
@@ -1656,7 +1629,6 @@ impl Default for UiData {
                 pdf_export_scope: crate::ui::intent::PdfExportScope::AllPages,
                 pdf_export_range: String::new(),
                 pdf_export_dpi: 0,
-                mail_merge: None,
                 show_export_dialog: false,
                 show_preferences: false,
                 show_adjustment_dialog: false,
@@ -1667,6 +1639,7 @@ impl Default for UiData {
                 levels_histogram: std::sync::Arc::new([[0; 256]; 4]),
                 show_warp_dialog: false,
                 warp_params: crate::core::warp::WarpParams::default(),
+                warp_size_max: crate::core::warp::BRUSH_MAX_FLOOR,
                 warp_resizing: false,
                 warp_resize_anchor: (0.0, 0.0),
                 warp_freeze: None,
@@ -1681,7 +1654,6 @@ impl Default for UiData {
                 lama_status_msg: String::new(),
                 show_exit_dialog: false,
                 show_close_dialog: false,
-                document_editor_error: None,
                 save_error: None,
                 show_reload_file_dialog: false,
                 reload_file_name: String::new(),

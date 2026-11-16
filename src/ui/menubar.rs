@@ -1629,11 +1629,6 @@ fn text_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         super::design_tools::open_text_path(ui.ctx());
         ui.close();
     }
-    ui.separator();
-    if ui.button("Tài liệu văn bản mới…").clicked() {
-        actions.doc.new_flow_text_document = true;
-        ui.close();
-    }
 }
 
 fn select_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {

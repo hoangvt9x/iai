@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use iai_canvas::canvas::{Canvas, MAX_DIMENSION};
-use iai_canvas::document::{Document, FlowTextBacking, FlowTextDocumentState, file_modified_at};
+use iai_canvas::document::{Document, file_modified_at};
 use iai_formats::iai::IaiLoad;
 use iai_formats::pdf::{PdfPages, PdfRenderPlan};
 use iai_formats::{ExportOptions, FormatRegistry};
@@ -328,7 +328,6 @@ pub(super) enum Decoded {
         active: usize,
         master: Option<Box<Canvas>>,
     },
-    Text(FlowTextBacking),
 }
 
 fn decode(path: &Path) -> Result<Decoded, String> {
@@ -349,7 +348,6 @@ fn decode(path: &Path) -> Result<Decoded, String> {
                 pages: doc.pages,
                 master: doc.master.map(Box::new),
             }),
-            IaiLoad::FlowTextDocument(backing) => Ok(Decoded::Text(backing)),
             IaiLoad::PdfProject(_) => {
                 Err("an iAi PDF project opens in the app window (File > Open)".to_string())
             }
@@ -535,11 +533,6 @@ impl Command for OpenFile {
                     };
                     let id = s.new_document_id();
                     let mut doc = match decoded {
-                        Decoded::Text(backing) => {
-                            let mut doc = Document::new_flow_text(id);
-                            doc.flow_text = Some(FlowTextDocumentState::from_backing(backing));
-                            doc
-                        }
                         Decoded::Pages {
                             pages,
                             active,
@@ -673,7 +666,6 @@ enum Content {
         active: usize,
         master: Option<Canvas>,
     },
-    Text(FlowTextBacking),
 }
 
 /// What a document held when it was written, to tell after whether the
@@ -699,12 +691,6 @@ fn write(content: &Content, path: &Path, opts: &ExportOptions) -> Result<(), Str
         } => {
             let refs: Vec<&Canvas> = pages.iter().collect();
             iai_formats::iai::write_artboard_doc(path, &refs, *active, master.as_ref())
-        }
-        Content::Text(FlowTextBacking::Legacy(document)) => {
-            iai_formats::iai::write_flow_text_doc(path, document.as_ref())
-        }
-        Content::Text(FlowTextBacking::CanvasEditor(document)) => {
-            iai_formats::iai::write_canvas_editor_doc(path, document)
         }
     }
 }
@@ -744,9 +730,7 @@ impl Command for SaveFile {
                 "Dự án PDF được lưu trong cửa sổ app",
             ));
         }
-        let content = if let Some(flow) = &d.flow_text {
-            Content::Text(flow.backing().clone())
-        } else if !d.pages.is_empty() {
+        let content = if !d.pages.is_empty() {
             let pages = d.all_page_canvases().into_iter().map(detached).collect();
             Content::Pages {
                 pages,

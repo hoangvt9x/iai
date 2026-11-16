@@ -25,12 +25,6 @@ fn own_pages(s: &Session<'_>, doc: u32) -> Result<(), CmdError> {
             "Trang của PDF đang mở được đổi ở thanh trang",
         ));
     }
-    if d.is_flow_text() {
-        return Err(not_enabled(
-            "a text document lays its pages out itself",
-            "Tài liệu văn bản tự chia trang",
-        ));
-    }
     if d.deferred_raw {
         s.canvas(Some(doc))?;
     }

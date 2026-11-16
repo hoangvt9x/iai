@@ -891,46 +891,6 @@ pub(crate) fn close_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut Ui
     }
 }
 
-pub(crate) fn document_editor_error_dialog(
-    ctx: &egui::Context,
-    data: &UiData,
-    actions: &mut UiActions,
-) {
-    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
-    let mut dismiss = enter_pressed || esc_pressed;
-
-    modal_overlay(ctx, "document_editor_error_dialog_overlay");
-
-    egui::Window::new("Canvas Editor Error")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .min_width(440.0)
-        .order(DIALOG_ORDER)
-        .show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.label("Canvas Editor could not complete the operation.");
-            ui.add_space(8.0);
-            if let Some(message) = data.dialogs.document_editor_error.as_deref() {
-                ui.label(egui::RichText::new(message).color(egui::Color32::from_rgb(
-                    235, 170, 100,
-                )));
-            }
-            ui.add_space(8.0);
-            ui.label(
-                "iAi kept the document open and did not overwrite a file. Dismiss this message, then retry the action.",
-            );
-            ui.add_space(16.0);
-            if ui.button("  OK  ").clicked() {
-                dismiss = true;
-            }
-        });
-
-    if dismiss {
-        actions.dialogs.dismiss_document_editor_error = true;
-    }
-}
-
 /// A save or export that did not happen. Modal, because the status line alone
 /// is too easily taken for "saved".
 pub(crate) fn save_error_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
