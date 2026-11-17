@@ -230,7 +230,7 @@ pub(super) fn font_family_field(
     let query_id = egui::Id::new("text_panel_font_query");
     // egui's invisible TextEdit that owns keystrokes for the text on canvas.
     let canvas_text_id = egui::Id::new("text_overlay_te");
-    let current_name = data.tool.text_font_family.name().to_string();
+    let current_name = data.tool.text_bar.font_family.name().to_string();
 
     let editing = ui.data(|d| d.get_temp::<bool>(editing_id).unwrap_or(false));
     let mut querying = editing && ui.data(|d| d.get_temp::<bool>(query_id).unwrap_or(false));
@@ -386,7 +386,7 @@ pub(super) fn font_family_field(
                                     let Some(family) = matches.get(i).copied() else {
                                         continue;
                                     };
-                                    let is_sel = &data.tool.text_font_family == family;
+                                    let is_sel = &data.tool.text_bar.font_family == family;
                                     let (rect, row) = ui.allocate_exact_size(
                                         egui::vec2(ui.available_width(), ROW_H),
                                         egui::Sense::click(),

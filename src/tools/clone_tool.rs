@@ -1,4 +1,4 @@
-use super::brush::{BrushTool, StrokeBuffer, soft_round_alpha};
+use super::brush::{BrushTool, StrokeBuffer, legacy_round_alpha as soft_round_alpha};
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::canvas::Canvas;
 use crate::core::tile::TileMap;

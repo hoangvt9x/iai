@@ -124,8 +124,8 @@ pub(crate) fn sanitize_font_id(s: &str) -> String {
         .collect()
 }
 
-/// Per-character overrides of the base text style.
-/// Tracking/opacity stay layer-wide.
+/// Per-character overrides of the base text style. Opacity stays
+/// layer-wide.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlyphStyle {
     pub color: [u8; 4],
@@ -134,6 +134,13 @@ pub struct GlyphStyle {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    /// Space after this letter, canvas pixels (Photoshop's tracking of the
+    /// letters selected); `None`: the text's own `tracking_px`.
+    pub tracking_px: Option<f32>,
+    /// The line height this letter asks of its line, as a multiple of its
+    /// size (Photoshop's leading of the letters selected: a line takes the
+    /// largest its letters ask); `None`: the text's own `line_height`.
+    pub line_height: Option<f32>,
 }
 
 /// Text set along a path: Illustrator's Type on a Path, CorelDRAW's Fit
@@ -206,6 +213,10 @@ pub struct TextData {
     /// (gold lettering on a price list, plan M3.3); the words stay
     /// editable. `None`: the colours as they are.
     pub fill: Option<TextFill>,
+    /// Paragraph type (Photoshop's text box): the lines wrap at this width,
+    /// canvas pixels before the stretch, and the alignment is within it.
+    /// `None`: point type, a line ends only where a new line is typed.
+    pub box_width: Option<f32>,
 }
 
 /// A gradient across a text's letters: colours at shares of the way across
@@ -260,14 +271,24 @@ impl TextFill {
 impl TextData {
     /// Effective style of the `i`-th character (falls back to the base style).
     pub fn glyph_style(&self, i: usize) -> GlyphStyle {
-        self.glyph_styles.get(i).cloned().unwrap_or(GlyphStyle {
+        self.glyph_styles
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| self.base_glyph_style())
+    }
+
+    /// The base style, as a letter without one of its own has it.
+    pub fn base_glyph_style(&self) -> GlyphStyle {
+        GlyphStyle {
             color: self.color,
             font_px: self.font_px,
             font_family: self.font_family.clone(),
             bold: self.bold,
             italic: self.italic,
             underline: self.underline,
-        })
+            tracking_px: None,
+            line_height: None,
+        }
     }
 
     /// Materialize `glyph_styles` to one explicit entry per character (seeded
@@ -284,14 +305,7 @@ impl TextData {
     /// Drop `glyph_styles` when every entry equals the base style, keeping the
     /// common (uniform) case cheap to store and compare.
     pub fn compact_glyph_styles(&mut self) {
-        let base = GlyphStyle {
-            color: self.color,
-            font_px: self.font_px,
-            font_family: self.font_family.clone(),
-            bold: self.bold,
-            italic: self.italic,
-            underline: self.underline,
-        };
+        let base = self.base_glyph_style();
         if self.glyph_styles.iter().all(|s| *s == base) {
             self.glyph_styles.clear();
         }
@@ -319,6 +333,7 @@ impl Default for TextData {
             glyph_styles: Vec::new(),
             path: None,
             fill: None,
+            box_width: None,
         }
     }
 }

@@ -1,0 +1,7 @@
+burn_sha_e20_p: brush=computedBrush diameter=1000 hardness=100 spacing=25 exposure=20 mode=burnInS legacy=false
+burn_sha_e20_np: brush=computedBrush diameter=1000 hardness=100 spacing=25 exposure=20 mode=burnInS legacy=true
+burn_sha_e50_p: brush=computedBrush diameter=1000 hardness=100 spacing=25 exposure=50 mode=burnInS legacy=false
+burn_sha_e50_np: brush=computedBrush diameter=1000 hardness=100 spacing=25 exposure=50 mode=burnInS legacy=true
+burn_sha_e100_p: brush=computedBrush diameter=1000 hardness=100 spacing=25 exposure=100 mode=burnInS legacy=false
+burn_sha_e100_np: brush=computedBrush diameter=1000 hardness=100 spacing=25 exposure=100 mode=burnInS legacy=true
+painted 6

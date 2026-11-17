@@ -43,6 +43,63 @@ const RAW_PREFETCH_OFFSETS: [isize; 3] = [1, -1, 2];
 /// Threads reading embedded previews for the filmstrip at once.
 const RAW_PREVIEW_WORKERS: usize = 3;
 
+/// File names compared as Explorer sorts them by name: letters without
+/// regard to case, a run of digits by its number (`IMG_2` before `IMG_10`).
+fn natural_name_order(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (a.peek().copied(), b.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let run = |it: &mut std::iter::Peekable<std::str::Chars<'_>>| {
+                    let mut digits = String::new();
+                    while let Some(c) = it.peek().copied().filter(char::is_ascii_digit) {
+                        digits.push(c);
+                        it.next();
+                    }
+                    digits
+                };
+                let (da, db) = (run(&mut a), run(&mut b));
+                let (ta, tb) = (da.trim_start_matches('0'), db.trim_start_matches('0'));
+                let by_number = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb));
+                // Equal numbers: fewer leading zeros first.
+                match by_number.then_with(|| da.len().cmp(&db.len())) {
+                    Ordering::Equal => {}
+                    other => return other,
+                }
+            }
+            (Some(x), Some(y)) => {
+                let (lx, ly) = (x.to_lowercase(), y.to_lowercase());
+                match lx.cmp(ly) {
+                    Ordering::Equal => {
+                        a.next();
+                        b.next();
+                    }
+                    other => return other,
+                }
+            }
+        }
+    }
+}
+
+/// Files picked or dropped together, in the order they are opened: by name,
+/// as Explorer lists them (Windows hands a selection over in its own order,
+/// the file clicked last often first).
+pub(crate) fn sort_for_opening(paths: &mut [PathBuf]) {
+    paths.sort_by(|a, b| {
+        let name = |p: &PathBuf| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        natural_name_order(&name(a), &name(b))
+            .then_with(|| natural_name_order(&a.to_string_lossy(), &b.to_string_lossy()))
+    });
+}
+
 /// An embedded preview at the size the session shows it.
 fn shrink_raw_preview(
     mut preview: crate::formats::raw_preview::RawPreview,
@@ -269,27 +326,38 @@ mod raw_transition_tests {
         app.attach_loaded_doc(path, canvas, None, None);
     }
 
-    /// Pictures open as `file.open` opens them for an agent: the first is
-    /// shown, the next waits behind it, and both are recent files.
+    /// Pictures open as `file.open` opens them for an agent, several at once
+    /// as Photoshop opens them: tabs in name order (as Explorer lists them),
+    /// whichever is read first, the last one shown in the last tab; all are
+    /// recent files.
     #[test]
-    fn pictures_open_through_the_command_the_first_shown() {
-        let dir = std::env::temp_dir().join(format!("iai_open_two_{}", std::process::id()));
+    fn pictures_open_in_name_order_the_last_shown_last() {
+        let dir = std::env::temp_dir().join(format!("iai_open_three_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let write = |name: &str, rgb: [u8; 3]| {
+        let write = |name: &str, w: u32, h: u32, rgb: [u8; 3]| {
             let path = dir.join(name);
-            image::RgbImage::from_pixel(12, 8, image::Rgb(rgb))
+            image::RgbImage::from_pixel(w, h, image::Rgb(rgb))
                 .save(&path)
                 .unwrap();
             path
         };
-        let (first, second) = (write("mot.png", [200, 0, 0]), write("hai.png", [0, 0, 200]));
+        // The first by name is the slowest to read.
+        let two = write("anh 2.png", 1600, 1200, [200, 0, 0]);
+        let nine = write("anh 9.png", 12, 8, [0, 200, 0]);
+        let ten = write("anh 10.png", 14, 8, [0, 0, 200]);
         let mut app = App::new();
-        app.start_load_paths(vec![first.clone(), second.clone()]);
+        app.open_files(vec![ten.clone(), two.clone(), nine.clone()]);
         app.finish_commands(std::time::Duration::from_secs(60));
-        let paths: Vec<_> = app.docs.documents.iter().map(|d| d.path.clone()).collect();
-        assert!(paths.contains(&Some(first.clone())) && paths.contains(&Some(second.clone())));
-        assert_eq!(app.docs.active().path.as_deref(), Some(first.as_path()));
-        assert_eq!(app.docs.active().canvas.width, 12);
+        let paths: Vec<_> = app
+            .docs
+            .documents
+            .iter()
+            .filter_map(|d| d.path.clone())
+            .collect();
+        assert_eq!(paths, vec![two.clone(), nine.clone(), ten.clone()]);
+        assert_eq!(app.docs.active_doc_idx + 1, app.docs.documents.len());
+        assert_eq!(app.docs.active().path.as_deref(), Some(ten.as_path()));
+        assert_eq!(app.docs.active().canvas.width, 14);
         assert!(!app.docs.active().is_modified());
         assert!(app.jobs.open_jobs.is_empty() && app.jobs.loading_keys.is_empty());
         let recent: Vec<_> = app
@@ -299,8 +367,39 @@ mod raw_transition_tests {
             .iter()
             .map(|e| e.path.clone())
             .collect();
-        assert!(recent.contains(&first) && recent.contains(&second));
+        assert!(recent.contains(&two) && recent.contains(&nine) && recent.contains(&ten));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_sort_by_name_as_explorer_lists_them() {
+        let mut paths: Vec<std::path::PathBuf> = [
+            "IMG_10.jpg",
+            "img_2.JPG",
+            "IMG_1.jpg",
+            "b.png",
+            "a 02.png",
+            "a 1.png",
+        ]
+        .iter()
+        .map(|n| std::path::PathBuf::from(format!("C:/anh/{n}")))
+        .collect();
+        super::sort_for_opening(&mut paths);
+        let names: Vec<_> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "a 1.png",
+                "a 02.png",
+                "b.png",
+                "IMG_1.jpg",
+                "img_2.JPG",
+                "IMG_10.jpg"
+            ]
+        );
     }
 
     #[test]
@@ -419,6 +518,8 @@ mod raw_transition_tests {
         let b_before8: Vec<u8> = b_before.iter().map(|v| (v >> 8) as u8).collect();
         assert_ne!(b_after, b_before8, "b got its own settings");
         assert!(app.dev.develop_session.is_empty() && app.dev.develop_marked.is_empty());
+        // The last opened in the filmstrip's order is shown at the end.
+        assert_eq!(app.docs.active().id, b);
     }
 
     #[test]
@@ -637,6 +738,23 @@ impl App {
         }
     }
 
+    /// Open files picked or dropped together: by name, as Explorer lists
+    /// them, the last one shown in the last tab.
+    pub fn open_files(&mut self, mut paths: Vec<PathBuf>) {
+        sort_for_opening(&mut paths);
+        self.start_load_paths(paths);
+    }
+
+    /// Files dropped from the OS (winit sends one event per file), opened
+    /// together on the next frame as one Open of several files.
+    pub fn flush_dropped_open_files(&mut self) {
+        if self.jobs.dropped_open_files.is_empty() {
+            return;
+        }
+        let paths = std::mem::take(&mut self.jobs.dropped_open_files);
+        self.open_files(paths);
+    }
+
     /// Kick off background import of `paths`. A worker thread decodes each file
     /// (the expensive step) off the UI thread and streams the result back, so
     /// opening a large image — or several at once — never freezes the window.
@@ -645,7 +763,14 @@ impl App {
         let mut queued_keys = HashSet::new();
         let mut paths_to_load: Vec<PathBuf> = Vec::new();
         let mut pdf_enqueued = false;
-        for path in paths.into_iter().filter(|p| p.exists()) {
+        let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.exists()).collect();
+        // Of several files, the last is the one shown at the end; one already
+        // open elsewhere in the list only says so (its tab is not brought
+        // forward while the others open).
+        let last_key = paths.last().map(|p| normalized_path_key(p));
+        let mut shown_already_open = false;
+        for path in paths {
+            let is_last = last_key.as_ref() == Some(&normalized_path_key(&path));
             // PDFs open through the page-selection dialog (one at a time) instead
             // of the generic loader; queue them for probing.
             if crate::formats::pdf::is_pdf_path(&path) {
@@ -691,7 +816,12 @@ impl App {
                 continue;
             }
             if let Some(idx) = self.find_open_document_by_path(&path) {
-                self.focus_existing_open_path(idx, path);
+                if is_last {
+                    self.focus_existing_open_path(idx, path);
+                    shown_already_open = true;
+                } else {
+                    self.shell.status_msg = format!("Already open: {}", file_name(&path));
+                }
                 continue;
             }
             let key = normalized_path_key(&path);
@@ -741,20 +871,24 @@ impl App {
                 self.jobs.loading_keys.insert(normalized_path_key(path));
             }
             // Pictures open as an agent opens them: `file.open`, one job each,
-            // the first shown and the rest behind it, a multi-page file a tab
-            // per page. A RAW then waits behind the pictures.
+            // a multi-page file a tab per page. They are read side by side but
+            // become tabs in the order asked, the last one shown (the others
+            // behind it), as Photoshop opens several files. A RAW then waits
+            // behind the pictures.
             let pictures = !paths_to_decode.is_empty();
             if pictures && !self.has_only_welcome_placeholder() {
                 self.docs.active_mut().reconcile_pdf_page_modified();
             }
+            let last = paths_to_decode.len().saturating_sub(1);
             for (index, path) in paths_to_decode.into_iter().enumerate() {
                 let args = serde_json::json!({
                     "path": path.display().to_string(),
-                    "show": index == 0,
+                    "show": index == last && !shown_already_open,
                     "pagesAsTabs": true,
                 });
                 match self.start_command("file.open", args) {
                     Some(iai_engine::Reply::Started { job }) => {
+                        self.engine.apply_in_turn(job);
                         self.jobs.open_jobs.push((job, path));
                     }
                     _ => {
@@ -1595,7 +1729,7 @@ impl App {
                 self.jobs.pending_file_dialog = None;
                 match result {
                     file_io::FileDialogResult::OpenedMany(paths) => {
-                        self.start_load_paths(paths);
+                        self.open_files(paths);
                     }
                     file_io::FileDialogResult::SaveAs(mut path) => {
                         if path.extension().is_none() {

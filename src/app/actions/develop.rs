@@ -714,6 +714,10 @@ impl App {
                 ),
             );
             self.finish_develop_bake_all(st.total_images, st.developed, st.single_raw);
+            // Several opened: the last one (in the last tab) is shown.
+            if let Some(idx) = st.show_at_end.and_then(|id| self.docs.index_of(id)) {
+                self.switch_to_doc(idx);
+            }
         }
     }
 

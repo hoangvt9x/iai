@@ -1,0 +1,971 @@
+{
+ "about": "Dodge / Burn parity cases: the tool runs over a base picture (PNG beside this file); see cases.json for the brush ones.",
+ "cases": [
+  {
+   "id": "dodge_sha_e20_p",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 20,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_sha_e20_np",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 20,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_sha_e50_p",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 50,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_sha_e50_np",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 50,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_sha_e100_p",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 100,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_sha_e100_np",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 100,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_mid_e20_p",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 20,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_mid_e20_np",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 20,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_mid_e50_p",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_mid_e50_np",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_mid_e100_p",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 100,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_mid_e100_np",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 100,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_hig_e20_p",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 20,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_hig_e20_np",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 20,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_hig_e50_p",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 50,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_hig_e50_np",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 50,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_hig_e100_p",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 100,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "dodge_hig_e100_np",
+   "tool": "dodge",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 100,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_sha_e20_p",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 20,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_sha_e20_np",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 20,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_sha_e50_p",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 50,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_sha_e50_np",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 50,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_sha_e100_p",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 100,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_sha_e100_np",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "shadows",
+   "exposure": 100,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_mid_e20_p",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 20,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_mid_e20_np",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 20,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_mid_e50_p",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_mid_e50_np",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_mid_e100_p",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 100,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_mid_e100_np",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 100,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_hig_e20_p",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 20,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_hig_e20_np",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 20,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_hig_e50_p",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 50,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_hig_e50_np",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 50,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_hig_e100_p",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 100,
+   "protect": true,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "id": "burn_hig_e100_np",
+   "tool": "burn",
+   "base": "base_ramp.png",
+   "w": 256,
+   "h": 48,
+   "size": 1000,
+   "hardness": 100,
+   "range": "highlights",
+   "exposure": 100,
+   "protect": false,
+   "strokes": [
+    [
+     [
+      128,
+      24
+     ]
+    ]
+   ]
+  },
+  {
+   "tool": "dodge",
+   "base": "base_gray128.png",
+   "w": 400,
+   "h": 100,
+   "size": 50,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "id": "dodge_acc_dab",
+   "strokes": [
+    [
+     [
+      200,
+      50
+     ]
+    ]
+   ]
+  },
+  {
+   "tool": "dodge",
+   "base": "base_gray128.png",
+   "w": 400,
+   "h": 100,
+   "size": 50,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "id": "dodge_acc_line_sp25",
+   "strokes": [
+    [
+     [
+      40,
+      50
+     ],
+     [
+      360,
+      50
+     ]
+    ]
+   ]
+  },
+  {
+   "tool": "dodge",
+   "base": "base_gray128.png",
+   "w": 400,
+   "h": 100,
+   "size": 50,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "id": "dodge_acc_line_sp1",
+   "spacing": 1,
+   "strokes": [
+    [
+     [
+      40,
+      50
+     ],
+     [
+      360,
+      50
+     ]
+    ]
+   ]
+  },
+  {
+   "tool": "dodge",
+   "base": "base_gray128.png",
+   "w": 400,
+   "h": 100,
+   "size": 50,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "id": "dodge_acc_twice",
+   "strokes": [
+    [
+     [
+      40,
+      50
+     ],
+     [
+      360,
+      50
+     ]
+    ],
+    [
+     [
+      40,
+      50
+     ],
+     [
+      360,
+      50
+     ]
+    ]
+   ]
+  },
+  {
+   "tool": "dodge",
+   "base": "base_gray128_sq.png",
+   "w": 200,
+   "h": 200,
+   "size": 100,
+   "hardness": 0,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "id": "dodge_soft_dab",
+   "strokes": [
+    [
+     [
+      100,
+      100
+     ]
+    ]
+   ]
+  },
+  {
+   "tool": "burn",
+   "base": "base_gray128.png",
+   "w": 400,
+   "h": 100,
+   "size": 50,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "id": "burn_acc_dab",
+   "strokes": [
+    [
+     [
+      200,
+      50
+     ]
+    ]
+   ]
+  },
+  {
+   "tool": "burn",
+   "base": "base_gray128.png",
+   "w": 400,
+   "h": 100,
+   "size": 50,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "id": "burn_acc_line_sp25",
+   "strokes": [
+    [
+     [
+      40,
+      50
+     ],
+     [
+      360,
+      50
+     ]
+    ]
+   ]
+  },
+  {
+   "tool": "burn",
+   "base": "base_gray128.png",
+   "w": 400,
+   "h": 100,
+   "size": 50,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "id": "burn_acc_line_sp1",
+   "spacing": 1,
+   "strokes": [
+    [
+     [
+      40,
+      50
+     ],
+     [
+      360,
+      50
+     ]
+    ]
+   ]
+  },
+  {
+   "tool": "burn",
+   "base": "base_gray128.png",
+   "w": 400,
+   "h": 100,
+   "size": 50,
+   "hardness": 100,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "id": "burn_acc_twice",
+   "strokes": [
+    [
+     [
+      40,
+      50
+     ],
+     [
+      360,
+      50
+     ]
+    ],
+    [
+     [
+      40,
+      50
+     ],
+     [
+      360,
+      50
+     ]
+    ]
+   ]
+  },
+  {
+   "tool": "burn",
+   "base": "base_gray128_sq.png",
+   "w": 200,
+   "h": 200,
+   "size": 100,
+   "hardness": 0,
+   "range": "midtones",
+   "exposure": 50,
+   "protect": true,
+   "id": "burn_soft_dab",
+   "strokes": [
+    [
+     [
+      100,
+      100
+     ]
+    ]
+   ]
+  }
+ ]
+}

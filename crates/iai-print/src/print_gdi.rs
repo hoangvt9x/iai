@@ -65,6 +65,10 @@ pub enum PrintStage {
     SendingPage,
     ClosingPage,
     FinishingJob,
+    /// Rendering a page of an opened PDF that was never shown: the worker's
+    /// own work, no driver call, so it is never "a printer that does not
+    /// answer".
+    RenderingPage,
 }
 
 impl PrintStage {
@@ -76,6 +80,7 @@ impl PrintStage {
             4 => Self::SendingPage,
             5 => Self::ClosingPage,
             6 => Self::FinishingJob,
+            7 => Self::RenderingPage,
             _ => Self::Preparing,
         }
     }
@@ -84,6 +89,7 @@ impl PrintStage {
     pub fn label(self) -> &'static str {
         match self {
             Self::Preparing => "preparing the page",
+            Self::RenderingPage => "rendering the PDF page",
             Self::ReadingState => "asking the spooler how the printer is (GetPrinter)",
             Self::OpeningDevice => "opening the device (CreateDC)",
             Self::StartingJob => "starting the job (StartDoc)",
@@ -1096,6 +1102,23 @@ mod tests {
         );
         assert_eq!(progress.stage(), PrintStage::StartingJob, "not entered");
         assert_eq!(progress.steps(), 2);
+    }
+
+    #[test]
+    fn every_stage_reads_back_as_itself() {
+        use PrintStage::*;
+        for stage in [
+            Preparing,
+            ReadingState,
+            OpeningDevice,
+            StartingJob,
+            SendingPage,
+            ClosingPage,
+            FinishingJob,
+            RenderingPage,
+        ] {
+            assert_eq!(PrintStage::from_u8(stage as u8), stage);
+        }
     }
 
     /// EPSON photo printer, 10×15 cm paper at 720 dpi with ~3 mm margins —

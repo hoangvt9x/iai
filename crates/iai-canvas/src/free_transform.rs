@@ -617,6 +617,14 @@ pub fn scaled_text_data(td: &TextData, sx: f32, sy: f32) -> Option<TextData> {
             iai_text::text::MIN_EDITABLE_FONT_PX,
             iai_text::text::MAX_EDITABLE_FONT_PX,
         )?;
+        if let Some(t) = gs.tracking_px {
+            gs.tracking_px = Some(clamped_or_bail(t * font_scale, -200.0, 500.0)?);
+        }
+    }
+    // A paragraph box scales with its words (the stretch carries the rest
+    // of a wider scale), so they wrap where they did.
+    if let Some(w) = out.box_width {
+        out.box_width = Some(clamped_or_bail(w * font_scale, 1.0, 100_000.0)?);
     }
     Some(out)
 }

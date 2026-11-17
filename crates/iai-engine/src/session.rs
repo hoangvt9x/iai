@@ -181,6 +181,14 @@ impl Engine {
         self.jobs.busy() || !self.ready.is_empty()
     }
 
+    /// Apply job `job` in its turn: not before every job started before it
+    /// that is also applied in turn has been applied (the pictures of one
+    /// Open, read side by side, still become tabs in the order asked). False
+    /// when it is no longer running.
+    pub fn apply_in_turn(&mut self, job: JobId) -> bool {
+        self.jobs.apply_in_turn(job)
+    }
+
     /// The jobs whose work has ended since the last poll, by id and command:
     /// `Session::poll` will apply them. The GUI looks before it polls, to put
     /// away what a result is about to replace.

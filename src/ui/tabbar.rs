@@ -1,5 +1,10 @@
 // Document tab bar — shown between the menu bar and the tool-options bar.
 // One tab per open document; clicking switches the active document.
+//
+// The strip always starts at the first tab and shows as many as fit; the
+// rest are listed, in order, under the ▾ button at the right. The tab being
+// worked on is always on the strip: when it is one of those that do not fit,
+// it takes the strip's last place (and is not listed).
 
 use super::{UiActions, UiData};
 use egui;
@@ -11,14 +16,69 @@ const TAB_MAX_W: f32 = 180.0;
 const CLOSE_W: f32 = 18.0;
 const NEW_BTN_W: f32 = 28.0;
 const DOC_LIST_BTN_W: f32 = 30.0;
+/// Room kept for the ▾ button when some tabs do not fit: its count ("12 ⌄")
+/// can be wider than the button's least width.
+const DOC_LIST_ROOM: f32 = 44.0;
 const DOC_LIST_ROW_H: f32 = 24.0;
 const DOC_LIST_MIN_W: f32 = 260.0;
 const DOC_LIST_MAX_W: f32 = 360.0;
 const PREVIEW_MAX_W: f32 = 160.0;
 const PREVIEW_MAX_H: f32 = 120.0;
-/// Per-tab "fully inside the strip" flags from the last layout, so the
-/// document list can offer only the tabs the strip is hiding.
-const TAB_VISIBLE_KEY: &str = "document_tab_fully_visible";
+
+/// Which tabs the strip shows, left to right, and which the ▾ list holds.
+#[derive(Debug, PartialEq)]
+struct StripPlan {
+    shown: Vec<usize>,
+    hidden: Vec<usize>,
+}
+
+/// The strip's tabs from the first, as many as fit in `room`; the tab
+/// `active` is always among them (in the last place when it would not fit in
+/// its own); the others, in order, go to the list.
+fn plan_strip(widths: &[f32], active: usize, room: f32) -> StripPlan {
+    let n = widths.len();
+    let mut fit = 0;
+    let mut used = 0.0;
+    while let Some(&w) = widths.get(fit) {
+        if used + w > room + 0.5 {
+            break;
+        }
+        used += w;
+        fit += 1;
+    }
+    let Some(&active_w) = widths.get(active).filter(|_| active >= fit) else {
+        return StripPlan {
+            shown: (0..fit).collect(),
+            hidden: (fit..n).collect(),
+        };
+    };
+    // The tab worked on does not fit in its own place: it takes the last.
+    let mut keep = 0;
+    let mut used = active_w;
+    while let Some(&w) = widths.get(keep).filter(|_| keep < active) {
+        if used + w > room + 0.5 {
+            break;
+        }
+        used += w;
+        keep += 1;
+    }
+    let mut shown: Vec<usize> = (0..keep).collect();
+    shown.push(active);
+    StripPlan {
+        shown,
+        hidden: (keep..n).filter(|&i| i != active).collect(),
+    }
+}
+
+/// The strip in `width` points: the tabs, the new-tab button after them, and
+/// the ▾ button at the right when some tabs are listed.
+fn plan_for_width(widths: &[f32], active: usize, width: f32) -> StripPlan {
+    let all = plan_strip(widths, active, width - NEW_BTN_W);
+    if all.hidden.is_empty() {
+        return all;
+    }
+    plan_strip(widths, active, width - NEW_BTN_W - DOC_LIST_ROOM)
+}
 
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
@@ -56,30 +116,15 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.spacing_mut().button_padding = egui::vec2(0.0, 0.0);
+                    let widths: Vec<f32> = (0..doc_count).map(|i| tab_width(data, i)).collect();
+                    let plan = plan_for_width(&widths, active, ui.available_width());
 
-                    // Reserve the document menu from the right before laying out
-                    // tabs, so it remains reachable when the tab row overflows.
+                    // The ▾ list sits at the right edge, the tabs from the left.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        build_document_list(ctx, ui, data, actions);
-
-                        // Keep the document list fixed while the tabs themselves
-                        // slide underneath the available strip.  A newly appended
-                        // document is revealed at the right edge automatically;
-                        // selecting an older document reveals that tab again.
-                        let tabs_size = egui::vec2(ui.available_width(), TAB_H);
-                        ui.allocate_ui_with_layout(
-                            tabs_size,
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                egui::ScrollArea::horizontal()
-                                    .id_salt("document_tab_scroll")
-                                    .scroll_bar_visibility(
-                                        egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                                    )
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| build_tabs(ui, data, actions));
-                            },
-                        );
+                        build_document_list(ctx, ui, data, actions, &plan.hidden);
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            build_tabs(ui, data, actions, &plan.shown, &widths);
+                        });
                     });
                 });
             });
@@ -94,48 +139,66 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
         });
 }
 
-fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    let pal = data.chrome.theme_mode.palette();
-    let count_key = egui::Id::new("document_tab_previous_count");
-    let active_key = egui::Id::new("document_tab_previous_active");
-    let previous_count = ui
-        .ctx()
-        .data(|d| d.get_temp::<usize>(count_key))
-        .unwrap_or(0);
-    let previous_active = ui
-        .ctx()
-        .data(|d| d.get_temp::<usize>(active_key))
-        .unwrap_or(data.doc.active_doc_idx);
-    let documents_appended = data.doc.doc_count > previous_count;
-    let active_changed = data.doc.active_doc_idx != previous_active;
-    let viewport = ui.clip_rect();
-    let mut fully_visible = Vec::with_capacity(data.doc.doc_count);
+/// The title tab `i` shows: its name (shortened), `*` when it has unsaved
+/// changes.
+fn tab_label(data: &UiData, i: usize) -> String {
+    let title = data
+        .doc
+        .doc_titles
+        .get(i)
+        .map(|s| s.as_str())
+        .unwrap_or("Untitled");
+    let dirty = data.doc.doc_modified.get(i).copied().unwrap_or(false);
+    let display = if dirty {
+        format!("{}*", title)
+    } else {
+        title.to_string()
+    };
+    truncate_title(&display, 18)
+}
 
-    for i in 0..data.doc.doc_count {
-        let title = data
-            .doc
-            .doc_titles
-            .get(i)
-            .map(|s| s.as_str())
-            .unwrap_or("Untitled");
-        let dirty = data.doc.doc_modified.get(i).copied().unwrap_or(false);
+/// Whether tab `i` blinks: work ended while it was not in front.
+fn tab_wants_attention(data: &UiData, i: usize) -> bool {
+    i != data.doc.active_doc_idx && data.doc.doc_attention.get(i).copied().unwrap_or(false)
+}
+
+fn badge_width(data: &UiData, i: usize) -> f32 {
+    let busy = data.doc.doc_ai_busy.get(i).is_some_and(Option::is_some);
+    if busy || tab_wants_attention(data, i) {
+        14.0
+    } else {
+        0.0
+    }
+}
+
+/// Tab `i`'s width: its label counted in letters (not bytes: a Vietnamese
+/// letter with marks takes two or three), its badge and its close button.
+fn tab_width(data: &UiData, i: usize) -> f32 {
+    let text_w = 7.0_f32 * tab_label(data, i).chars().count() as f32;
+    (text_w + CLOSE_W + badge_width(data, i) + 20.0).clamp(TAB_MIN_W, TAB_MAX_W)
+}
+
+fn build_tabs(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    actions: &mut UiActions,
+    shown: &[usize],
+    widths: &[f32],
+) {
+    let pal = data.chrome.theme_mode.palette();
+    for &i in shown {
         let is_active = i == data.doc.active_doc_idx;
         let ai_busy = data.doc.doc_ai_busy.get(i).and_then(Option::as_ref);
         // Work that ended while the tab was not in front (an ID photo made):
         // the tab blinks until it is shown.
-        let attention = !is_active && data.doc.doc_attention.get(i).copied().unwrap_or(false);
+        let attention = tab_wants_attention(data, i);
         let lit = attention && ui.ctx().input(|input| (input.time * 2.0).fract() < 0.5);
         if attention {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
         }
 
-        let display = if dirty {
-            format!("{}*", title)
-        } else {
-            title.to_string()
-        };
-        let label_text = truncate_title(&display, 18);
+        let label_text = tab_label(data, i);
         let tab_fill = if is_active {
             pal.panel_bg
         } else if lit {
@@ -149,30 +212,15 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             pal.text_dim
         };
         let font_id = egui::FontId::proportional(11.5);
-        let text_w = 7.0_f32 * label_text.len() as f32;
-        let busy_w = if ai_busy.is_some() || attention {
-            14.0
-        } else {
-            0.0
-        };
-        let tab_w = (text_w + CLOSE_W + busy_w + 20.0).clamp(TAB_MIN_W, TAB_MAX_W);
+        let busy_w = badge_width(data, i);
+        let tab_w = widths.get(i).copied().unwrap_or(TAB_MIN_W);
 
         let (tab_rect, tab_response) =
             ui.allocate_exact_size(egui::vec2(tab_w, TAB_H), egui::Sense::click());
-        fully_visible
-            .push(tab_rect.min.x >= viewport.min.x - 0.5 && tab_rect.max.x <= viewport.max.x + 0.5);
         if tab_response.hovered() {
             actions.doc.hovered_doc = Some(i);
         }
         let tab_response = with_doc_preview(tab_response, data, i);
-
-        // Appends take precedence so the newest filename is always visible on
-        // the right.  Otherwise follow explicit tab/keyboard navigation.
-        if documents_appended && i + 1 == data.doc.doc_count {
-            tab_response.scroll_to_me(Some(egui::Align::Max));
-        } else if !documents_appended && active_changed && is_active {
-            tab_response.scroll_to_me(Some(egui::Align::Center));
-        }
         let painter = ui.painter();
         painter.rect_filled(tab_rect, 0.0, tab_fill);
 
@@ -308,12 +356,6 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if new_resp.clicked() {
         actions.doc.new_doc_tab = true;
     }
-
-    ui.ctx().data_mut(|d| {
-        d.insert_temp(count_key, data.doc.doc_count);
-        d.insert_temp(active_key, data.doc.active_doc_idx);
-        d.insert_temp(egui::Id::new(TAB_VISIBLE_KEY), fully_visible);
-    });
 }
 
 /// Attach tab `i`'s preview as a hover tooltip: only the low-resolution image,
@@ -353,17 +395,12 @@ fn build_document_list(
     ui: &mut egui::Ui,
     data: &UiData,
     actions: &mut UiActions,
+    hidden: &[usize],
 ) {
     let pal = data.chrome.theme_mode.palette();
-    // Offer only the tabs the strip hides (off either end or clipped); an
-    // unknown flag (a tab appended since the last layout) counts as shown.
-    let visible = ctx
-        .data(|d| d.get_temp::<Vec<bool>>(egui::Id::new(TAB_VISIBLE_KEY)))
-        .unwrap_or_default();
-    let hidden = hidden_tabs(&visible, data.doc.doc_count);
-    let open_flag = egui::Id::new("doc_list_was_open");
+    // Only the tabs after the strip's, in order (the tab worked on is always
+    // on the strip, so it is never listed).
     if hidden.is_empty() {
-        ctx.data_mut(|d| d.insert_temp(open_flag, false));
         return;
     }
     // The popup frame has 6 px of vertical margin on each side. Grow with the
@@ -380,116 +417,68 @@ fn build_document_list(
     .fill(pal.app_bg)
     .corner_radius(0.0);
 
-    // Scroll to the active document only on the frame the popup opens, so a
-    // long list starts centered on it without fighting later user scrolling.
-    let was_open = ctx.data(|d| d.get_temp::<bool>(open_flag)).unwrap_or(false);
+    let (response, _) = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+        ui.set_min_width(DOC_LIST_MIN_W);
+        ui.set_max_width(DOC_LIST_MAX_W);
 
-    let (response, menu_inner) =
-        egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
-            ui.set_min_width(DOC_LIST_MIN_W);
-            ui.set_max_width(DOC_LIST_MAX_W);
+        egui::ScrollArea::vertical()
+            .id_salt("document_list_scroll")
+            .max_height(available_height)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.set_min_width(DOC_LIST_MIN_W);
 
-            egui::ScrollArea::vertical()
-                .id_salt("document_list_scroll")
-                .max_height(available_height)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.set_min_width(DOC_LIST_MIN_W);
+                for &i in hidden {
+                    let title = data
+                        .doc
+                        .doc_titles
+                        .get(i)
+                        .map(|s| s.as_str())
+                        .unwrap_or("Untitled");
+                    let dirty = data.doc.doc_modified.get(i).copied().unwrap_or(false);
+                    let display = if dirty {
+                        format!("{} *", title)
+                    } else {
+                        title.to_string()
+                    };
 
-                    for &i in &hidden {
-                        let title = data
-                            .doc
-                            .doc_titles
-                            .get(i)
-                            .map(|s| s.as_str())
-                            .unwrap_or("Untitled");
-                        let dirty = data.doc.doc_modified.get(i).copied().unwrap_or(false);
-                        let is_active = i == data.doc.active_doc_idx;
-                        let display = if dirty {
-                            format!("{} *", title)
-                        } else {
-                            title.to_string()
-                        };
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let close = ui
+                                .add_sized(
+                                    [DOC_LIST_ROW_H, DOC_LIST_ROW_H],
+                                    egui::Button::new(ph::X).frame(false),
+                                )
+                                .on_hover_text(format!("Close {}", title));
 
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let close = ui
-                                        .add_sized(
-                                            [DOC_LIST_ROW_H, DOC_LIST_ROW_H],
-                                            egui::Button::new(ph::X).frame(false),
-                                        )
-                                        .on_hover_text(format!("Close {}", title));
-
-                                    let row_width = ui.available_width();
-                                    let label = truncate_title(&display, 42);
-                                    let label = if is_active {
-                                        egui::RichText::new(label).strong().color(pal.text)
-                                    } else {
-                                        egui::RichText::new(label)
-                                    };
-                                    let select = ui.add_sized(
-                                        [row_width, DOC_LIST_ROW_H],
-                                        egui::Button::new(())
-                                            .left_text(label)
-                                            .selected(is_active)
-                                            .frame_when_inactive(false),
-                                    );
-                                    if select.hovered() {
-                                        actions.doc.hovered_doc = Some(i);
-                                    }
-                                    let select = with_doc_preview(select, data, i);
-
-                                    if is_active {
-                                        let row = select.rect.union(close.rect);
-                                        let painter = ui.painter();
-                                        painter.rect_stroke(
-                                            row,
-                                            2.0,
-                                            egui::Stroke::new(1.0_f32, pal.accent_primary),
-                                            egui::StrokeKind::Inside,
-                                        );
-                                        painter.rect_filled(
-                                            egui::Rect::from_min_max(
-                                                row.min,
-                                                egui::pos2(row.min.x + 3.0, row.max.y),
-                                            ),
-                                            0.0,
-                                            pal.accent_primary,
-                                        );
-                                        if !was_open {
-                                            select.scroll_to_me(Some(egui::Align::Center));
-                                        }
-                                    }
-
-                                    if close.clicked() {
-                                        actions.doc.close_doc_tab = Some(i);
-                                        ui.close();
-                                    } else if select.clicked() {
-                                        if !is_active {
-                                            actions.doc.switch_doc = Some(i);
-                                        }
-                                        ui.close();
-                                    }
-                                },
+                            let row_width = ui.available_width();
+                            let label = egui::RichText::new(truncate_title(&display, 42));
+                            let select = ui.add_sized(
+                                [row_width, DOC_LIST_ROW_H],
+                                egui::Button::new(())
+                                    .left_text(label)
+                                    .frame_when_inactive(false),
                             );
-                        });
-                    }
-                });
-        });
+                            if select.hovered() {
+                                actions.doc.hovered_doc = Some(i);
+                            }
+                            let select = with_doc_preview(select, data, i);
 
-    ctx.data_mut(|d| d.insert_temp(open_flag, menu_inner.is_some()));
+                            if close.clicked() {
+                                actions.doc.close_doc_tab = Some(i);
+                                ui.close();
+                            } else if select.clicked() {
+                                actions.doc.switch_doc = Some(i);
+                                ui.close();
+                            }
+                        });
+                    });
+                }
+            });
+    });
 
     response.on_hover_text(format!("{} more open documents", hidden.len()));
-}
-
-/// Indices of the tabs the strip does not show in full.
-fn hidden_tabs(fully_visible: &[bool], doc_count: usize) -> Vec<usize> {
-    (0..doc_count)
-        .filter(|&i| !fully_visible.get(i).copied().unwrap_or(true))
-        .collect()
 }
 
 fn truncate_title(s: &str, max_chars: usize) -> String {
@@ -504,13 +493,68 @@ fn truncate_title(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::hidden_tabs;
+    use super::{StripPlan, plan_strip};
+
+    fn plan(shown: &[usize], hidden: &[usize]) -> StripPlan {
+        StripPlan {
+            shown: shown.to_vec(),
+            hidden: hidden.to_vec(),
+        }
+    }
 
     #[test]
-    fn the_list_offers_only_tabs_the_strip_hides() {
-        assert!(hidden_tabs(&[true, true, true], 3).is_empty());
-        assert_eq!(hidden_tabs(&[false, true, true, false], 4), vec![0, 3]);
-        // A tab appended since the last layout is assumed shown until measured.
-        assert_eq!(hidden_tabs(&[false, true], 3), vec![0]);
+    fn the_strip_starts_at_the_first_tab_and_lists_the_rest_in_order() {
+        let widths = [100.0; 6];
+        // Everything fits: nothing listed.
+        assert_eq!(
+            plan_strip(&widths, 2, 600.0),
+            plan(&[0, 1, 2, 3, 4, 5], &[])
+        );
+        // Three fit: the next ones, in order, are listed.
+        assert_eq!(plan_strip(&widths, 1, 320.0), plan(&[0, 1, 2], &[3, 4, 5]));
+    }
+
+    /// The strip drawn to a picture, to look at (not a check):
+    /// `IAI_UI_SNAPSHOT=<folder> cargo test --lib probe_tab_strip -- --ignored`.
+    #[test]
+    #[ignore = "picture probe"]
+    fn probe_tab_strip() {
+        use crate::ui::{UiActions, UiData};
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        for (name, active) in [("cuoi", 29usize), ("giua", 14), ("dau", 2)] {
+            let mut data = UiData::default();
+            let n = 30;
+            data.doc.doc_count = n;
+            data.doc.active_doc_idx = active;
+            data.doc.doc_titles =
+                std::sync::Arc::new((1..=n).map(|i| format!("Ảnh khách {i:02}")).collect());
+            data.doc.doc_modified = std::sync::Arc::new(vec![false; n]);
+            data.doc.doc_ai_busy = std::sync::Arc::new(vec![None; n]);
+            data.doc.doc_attention = std::sync::Arc::new(vec![false; n]);
+            data.doc.doc_thumbs = std::sync::Arc::new(vec![None; n]);
+            data.doc.doc_dims = std::sync::Arc::new(vec![None; n]);
+            data.doc.doc_ids =
+                std::sync::Arc::new(vec![crate::core::document::DocumentId::NONE; n]);
+            let image = crate::ui::snapshot::render(1100.0, 60.0, 1.0, None, |ctx| {
+                let mut actions = UiActions::default();
+                super::build(ctx, &data, &mut actions);
+            });
+            image
+                .save(std::path::Path::new(&dir).join(format!("tab_{name}.png")))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn the_tab_worked_on_takes_the_last_place_when_it_does_not_fit() {
+        let widths = [100.0; 6];
+        // The last opened (and shown): the first two, then it.
+        assert_eq!(plan_strip(&widths, 5, 320.0), plan(&[0, 1, 5], &[2, 3, 4]));
+        // One from the middle of the list.
+        assert_eq!(plan_strip(&widths, 3, 320.0), plan(&[0, 1, 3], &[2, 4, 5]));
+        // No room even for it: it is still shown, alone.
+        assert_eq!(plan_strip(&widths, 4, 50.0), plan(&[4], &[0, 1, 2, 3, 5]));
     }
 }

@@ -42,6 +42,7 @@ impl App {
         }
 
         self.poll_file_dialog(event_loop);
+        self.flush_dropped_open_files();
         self.poll_pdf_export();
         self.poll_print_job();
         self.poll_raw_drafts(event_loop);
@@ -71,6 +72,7 @@ impl App {
             self.shell.status_msg = notice.to_string();
         }
         self.maybe_autosave();
+        self.persist_paint_prefs();
         self.report_selection_outcome();
 
         if self.win.pending_view_change {
@@ -81,7 +83,19 @@ impl App {
             }
         }
 
-        if !self.edit.pending_stroke_inputs.is_empty() {
+        // A paint tool keeps getting frames while the pointer is down and it
+        // still has work without new input (smoothing catching up with a
+        // resting pointer, the airbrush building up).
+        let frame_tool = self.edit.input.painting
+            && matches!(
+                self.edit.tools.active_id(),
+                crate::tools::ToolId::Brush | crate::tools::ToolId::Eraser
+            );
+        if !frame_tool {
+            self.edit.tool_wants_frames = false;
+        }
+        if !self.edit.pending_stroke_inputs.is_empty() || self.edit.tool_wants_frames {
+            let paint_t0 = std::time::Instant::now();
             let events: Vec<_> = self.edit.pending_stroke_inputs.drain(..).collect();
             let mut did_paint = false;
             for event in events {
@@ -96,7 +110,7 @@ impl App {
                 let _ = self.edit.tools.on_drag(event, &mut ctx);
                 did_paint = true;
             }
-            if did_paint {
+            let frame = {
                 let mut ctx = ToolCtx::new(
                     self.docs.active_mut(),
                     self.edit.fg_color,
@@ -105,12 +119,29 @@ impl App {
                     self.edit.view.offset_x,
                     self.edit.view.offset_y,
                 );
-                let _ = self.edit.tools.on_frame(&mut ctx);
+                self.edit.tools.on_frame(&mut ctx)
+            };
+            self.edit.tool_wants_frames = frame_tool && frame.needs_redraw;
+            if did_paint || self.edit.tool_wants_frames {
                 self.flush_canvas();
                 self.docs.active_mut().canvas.selection.refresh_bbox();
                 if self.docs.active().canvas.selection.active {
                     self.upload_selection_mask();
                 }
+            }
+            if frame_tool || self.edit.tools.active_id() == crate::tools::ToolId::Pencil {
+                let took = paint_t0.elapsed();
+                let stats = self.edit.paint_stroke_stats.get_or_insert(
+                    crate::app::editor_interaction::PaintStrokeStats {
+                        started: paint_t0,
+                        frames: 0,
+                        busy: std::time::Duration::ZERO,
+                        worst: std::time::Duration::ZERO,
+                    },
+                );
+                stats.frames += 1;
+                stats.busy += took;
+                stats.worst = stats.worst.max(took);
             }
         }
 
@@ -265,6 +296,13 @@ impl App {
                 } else {
                     Some(std::time::Instant::now() + repaint_delay)
                 };
+                if self.edit.tool_wants_frames {
+                    // Next frame for the paint tool (see above), on the app's
+                    // own redraw clock rather than a busy redraw request.
+                    let due = std::time::Instant::now() + std::time::Duration::from_millis(16);
+                    self.win.egui_repaint_deadline =
+                        Some(self.win.egui_repaint_deadline.map_or(due, |d| d.min(due)));
+                }
                 self.win.ui_cursor_icon = cursor_icon;
                 self.apply_ui_actions(actions, event_loop);
                 t_actions = Some(frame_t0.elapsed());
@@ -391,5 +429,75 @@ impl App {
                 .egui_repaint_deadline
                 .map_or(at, |deadline| deadline.min(at)),
         );
+    }
+}
+
+impl App {
+    /// One black-box line for the stroke just ended with a painting tool:
+    /// its settings and what painting it cost the UI thread.
+    pub(in crate::app) fn note_paint_stroke(&mut self, tool: crate::tools::ToolId) {
+        let Some(stats) = self.edit.paint_stroke_stats.take() else {
+            return;
+        };
+        use crate::tools::ToolId;
+        let (size, hardness, flow, spacing, opacity) = match tool {
+            ToolId::Eraser => {
+                let e = self.edit.tools.eraser();
+                (e.size, e.hardness, e.flow, e.spacing, e.opacity)
+            }
+            ToolId::Brush | ToolId::Pencil => {
+                let s = &self.edit.tools.brush().settings;
+                (s.size, s.hardness, s.flow, s.spacing, s.opacity)
+            }
+            _ => return,
+        };
+        let canvas = &self.docs.active().canvas;
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        let text = format!(
+            "{tool:?} {size:.0}px hard {:.0}% flow {:.0}% spacing {:.0}% opacity {:.0}% \
+             on {}x{}: {} frames, painting {:.0} ms (worst frame {:.1} ms) over {:.0} ms",
+            hardness * 100.0,
+            flow * 100.0,
+            spacing * 100.0,
+            opacity * 100.0,
+            canvas.width,
+            canvas.height,
+            stats.frames,
+            ms(stats.busy),
+            ms(stats.worst),
+            ms(stats.started.elapsed()),
+        );
+        crate::diag::note("stroke", &text);
+    }
+
+    /// Write the painting tools' options to `prefs.json` once they have
+    /// stayed put for a second (dragging a value changes them every frame);
+    /// quitting writes them too (`request_app_exit`).
+    fn persist_paint_prefs(&mut self) {
+        if self.edit.input.painting {
+            return;
+        }
+        let now = crate::tools::paint_prefs::PaintPrefs::of(&self.edit.tools);
+        match &self.edit.paint_prefs_saved {
+            None => {
+                // The first frame: what the tools started with is on file.
+                self.edit.paint_prefs_saved = Some(now);
+                return;
+            }
+            Some(saved) if *saved == now => {
+                self.edit.paint_prefs_changed_at = None;
+                return;
+            }
+            Some(_) => {}
+        }
+        let since = *self
+            .edit
+            .paint_prefs_changed_at
+            .get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() >= std::time::Duration::from_secs(1) {
+            now.save();
+            self.edit.paint_prefs_saved = Some(now);
+            self.edit.paint_prefs_changed_at = None;
+        }
     }
 }

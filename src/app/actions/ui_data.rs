@@ -354,7 +354,7 @@ impl App {
                         continue;
                     }
                     let mut a =
-                        crate::tools::brush::soft_round_alpha(d2, radius, hardness) * opacity;
+                        crate::tools::brush::legacy_round_alpha(d2, radius, hardness) * opacity;
                     if selection.active {
                         a *= selection.sample(px as u32, py as u32);
                     }
@@ -1187,6 +1187,7 @@ impl App {
             text_bold: self.edit.text_bold,
             text_italic: self.edit.text_italic,
             text_underline: self.edit.text_underline,
+            text_bar: self.text_bar_style(),
             text_line_height: self.edit.text_line_height,
             text_tracking_px: self.edit.text_tracking_px,
             text_opacity: self.edit.text_opacity,
@@ -1215,6 +1216,17 @@ impl App {
                 .map(|s| s.flip_y)
                 .unwrap_or(false),
             text_path: self.edit.text_edit.as_ref().and_then(|s| s.path.clone()),
+            text_box_width: self.edit.text_edit.as_ref().and_then(|s| s.box_width),
+            text_box_drag: self.edit.text_box_drag.map(|(from, to)| {
+                let (zoom, ox, oy) = (
+                    self.edit.view.zoom,
+                    self.edit.view.offset_x,
+                    self.edit.view.offset_y,
+                );
+                let screen = |p: (f32, f32)| (p.0 * zoom + ox, p.1 * zoom + oy);
+                let (a, b) = (screen(from), screen(to));
+                [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)]
+            }),
             text_glyph_styles: std::sync::Arc::new(
                 self.edit
                     .text_edit
@@ -1241,6 +1253,8 @@ impl App {
             brush_smoothing,
             brush_flow,
             brush_preset_idx,
+            brush_mode: self.edit.tools.brush().settings.mode,
+            brush_airbrush: self.edit.tools.brush().airbrush,
             brush_popup_pos: self.edit.brush_popup_pos,
             brush_color: self.edit.tools.brush().settings.color,
             brush_ink: self.ink_split_of(self.edit.tools.brush().settings.color),

@@ -1994,6 +1994,8 @@ mod tests {
                 bold: td.bold,
                 italic: td.italic,
                 underline: td.underline,
+                tracking_px: None,
+                line_height: None,
             })
             .collect();
         let Some(raster) = rasterize(&td) else {

@@ -1059,7 +1059,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             data.layers
                 .layer_types
                 .get(data.layers.active_layer_idx)
-                .is_some_and(|t| t == "Path"),
+                .is_some_and(|t| t == "Path" || t == "Text"),
         ))
         .clicked()
     {

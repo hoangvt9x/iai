@@ -645,6 +645,8 @@ struct LaidGlyph {
     bold: bool,
     italic: bool,
     underline: bool,
+    /// The letter's own line height (see `GlyphStyle::line_height`).
+    line_height: Option<f32>,
 }
 
 struct LaidLine {
@@ -659,6 +661,11 @@ struct LaidLine {
     max_font: f32,
     ascent: f32,
     descent: f32,
+    /// From the line above's baseline to this one's.
+    lead: f32,
+    /// Ended by a paragraph box's wrap, not by a new-line character: the
+    /// index at its end is also the next line's start, which takes it.
+    soft: bool,
 }
 
 struct TextLayout {
@@ -680,10 +687,12 @@ impl TextLayout {
     }
 
     /// Map a global character index to (line index, column within line).
+    /// The index where a paragraph box wrapped belongs to the next line's
+    /// start, not to this line's end.
     fn locate(&self, char_index: usize) -> (usize, usize) {
         for (li, line) in self.lines.iter().enumerate() {
             let end = line.start_char + line.len;
-            if char_index <= end {
+            if char_index < end || (char_index == end && !line.soft) {
                 return (li, char_index.saturating_sub(line.start_char).min(line.len));
             }
         }
@@ -735,6 +744,7 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
         .fold(0.0_f32, f32::max);
     let pad = (max_px * 0.2).ceil();
     let tracking_px = td.tracking_px.clamp(-base_px * 0.5, base_px * 4.0);
+    let box_width = td.box_width.filter(|w| w.is_finite() && *w >= 1.0);
 
     // Pass 1: per-line glyphs with line-relative x, plus line metrics.
     let mut glyphs: Vec<LaidGlyph> = Vec::with_capacity(chars.len());
@@ -746,10 +756,14 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
         let glyph0 = glyphs.len();
         let mut pen = 0.0f32;
         let mut prev: Option<(ab_glyph::GlyphId, TextFontFamily)> = None;
-        let mut ascent = base_ascent;
-        let mut descent = base_descent;
-        let mut max_font = base_px;
         let mut len = 0usize;
+
+        // Paragraph type: where the line may wrap (after the last space so
+        // far: the glyph and character the next line would start at, and
+        // where the ink ended before that space), and where the ink ends.
+        let mut wrap_at: Option<(usize, usize, f32)> = None;
+        let mut ink_end = 0.0f32;
+        let mut wrapped_width: Option<f32> = None;
 
         while char_i < chars.len() && chars[char_i] != '\n' {
             let ch = chars[char_i];
@@ -758,16 +772,31 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
             let glyph_font = font_for(&style.font_family).unwrap_or(base_font);
             let sf = glyph_font.as_scaled(PxScale::from(px));
             let id = sf.scaled_glyph(ch).id;
-            if let Some((p, prev_family)) = prev.as_ref()
-                && prev_family == &style.font_family
-            {
-                pen += sf.kern(*p, id);
-            }
-            let x_rel = pen;
+            let kern = match prev.as_ref() {
+                Some((p, prev_family)) if prev_family == &style.font_family => sf.kern(*p, id),
+                _ => 0.0,
+            };
             let adv = sf.h_advance(id);
-            ascent = ascent.max(sf.ascent());
-            descent = descent.min(sf.descent());
-            max_font = max_font.max(px);
+            // The box is full: the line ends after its last space (or, a word
+            // longer than the box, before this letter) and the rest goes on.
+            if let Some(box_w) = box_width
+                && len > 0
+                && !ch.is_whitespace()
+                && pen + kern + adv > box_w + 0.01
+            {
+                match wrap_at {
+                    Some((glyph, at_char, ink)) => {
+                        glyphs.truncate(glyph);
+                        len = glyph - glyph0;
+                        char_i = at_char;
+                        wrapped_width = Some(ink);
+                    }
+                    None => wrapped_width = Some(ink_end),
+                }
+                break;
+            }
+            pen += kern;
+            let x_rel = pen;
             glyphs.push(LaidGlyph {
                 ch,
                 x: x_rel,
@@ -778,17 +807,60 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
                 bold: style.bold,
                 italic: style.italic,
                 underline: style.underline,
+                line_height: style.line_height,
             });
             pen += adv;
+            if ch.is_whitespace() {
+                wrap_at = Some((glyphs.len(), char_i + 1, ink_end));
+            } else {
+                ink_end = pen;
+            }
             prev = Some((id, style.font_family));
             len += 1;
             char_i += 1;
             // Tracking folds into the just-pushed glyph unless it's the last
-            // one on the line.
+            // one on the line: the letter's own, else the text's.
             if char_i < chars.len() && chars[char_i] != '\n' {
-                pen += tracking_px;
+                let tracking = style
+                    .tracking_px
+                    .filter(|t| t.is_finite())
+                    .map_or(tracking_px, |t| t.clamp(-px * 0.5, px * 4.0));
+                pen += tracking;
                 let last = glyphs.len() - 1;
-                glyphs[last].advance += tracking_px;
+                glyphs[last].advance += tracking;
+            }
+        }
+
+        // The line's measures, from the letters it kept (the text's own size
+        // only for a line without any: a few letters enlarged elsewhere, or
+        // the text's own size left larger than all its letters, made every
+        // line as tall, 17/11).
+        let (mut ascent, mut descent, mut max_font) = if len > 0 {
+            (f32::MIN, f32::MAX, 0.0_f32)
+        } else {
+            (base_ascent, base_descent, base_px)
+        };
+        let mut own_lead: Option<f32> = None;
+        for g in &glyphs[glyph0..glyph0 + len] {
+            let font = font_for(&g.font_family).unwrap_or(base_font);
+            let sf = font.as_scaled(PxScale::from(g.scale));
+            ascent = ascent.max(sf.ascent());
+            descent = descent.min(sf.descent());
+            max_font = max_font.max(g.scale);
+        }
+        // A line some of whose letters ask for their own line height takes
+        // the largest any of its letters asks.
+        if glyphs[glyph0..glyph0 + len]
+            .iter()
+            .any(|g| g.line_height.is_some())
+        {
+            for g in &glyphs[glyph0..glyph0 + len] {
+                let mult = g
+                    .line_height
+                    .filter(|l| l.is_finite())
+                    .unwrap_or(line_height_mult)
+                    .max(0.5);
+                own_lead = Some(own_lead.unwrap_or(0.0).max(mult * g.scale));
             }
         }
 
@@ -797,15 +869,21 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
             baseline: 0.0,
             height: 0.0,
             start_x: 0.0,
-            width: pen + bold_extra,
+            width: wrapped_width.unwrap_or(pen) + bold_extra,
             start_char,
             len,
             glyph0,
             max_font,
             ascent,
             descent,
+            lead: own_lead.unwrap_or(line_height_mult * max_font),
+            soft: wrapped_width.is_some(),
         });
 
+        if wrapped_width.is_some() {
+            // Wrapped in the box: the next line goes on from here.
+            continue;
+        }
         if char_i < chars.len() && chars[char_i] == '\n' {
             char_i += 1; // consume newline into the boundary between lines
             if char_i == chars.len() {
@@ -822,6 +900,8 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
                     max_font: base_px,
                     ascent: base_ascent,
                     descent: base_descent,
+                    lead: line_height_mult * base_px,
+                    soft: false,
                 });
                 break;
             }
@@ -830,15 +910,17 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
         }
     }
 
-    // Pass 2: vertical stacking + alignment.
-    let max_w = lines.iter().map(|l| l.width).fold(0.0_f32, f32::max);
+    // Pass 2: vertical stacking + alignment (within the box, for
+    // paragraph type).
+    let widest = lines.iter().map(|l| l.width).fold(0.0_f32, f32::max);
+    let max_w = box_width.map_or(widest, |w| w.max(widest));
     let mut baseline = 0.0f32;
     let mut last_descent = base_descent;
     for (idx, line) in lines.iter_mut().enumerate() {
         if idx == 0 {
             baseline = line.ascent;
         } else {
-            baseline += line_height_mult * line.max_font;
+            baseline += line.lead;
         }
         line.baseline = baseline;
         line.top = baseline - line.ascent;
@@ -1139,7 +1221,11 @@ pub fn selection_rects(td: &TextData, char_range: Range<usize>) -> Option<Vec<Te
     for (line_idx, line) in layout.lines.iter().enumerate() {
         let line_start = line.start_char;
         let line_end = line_start + line.len;
-        let includes_newline = line_idx + 1 < layout.lines.len() && end_sel > line_end;
+        // A wrap in a paragraph box is no character: nothing is drawn past
+        // the line's end, and a selection starting at the next line leaves
+        // this one alone (it showed a block at its end, as if taken, 17/11).
+        let includes_newline =
+            !line.soft && line_idx + 1 < layout.lines.len() && end_sel > line_end;
         let sel_start = start_sel.max(line_start).min(line_end);
         let sel_end = end_sel.min(line_end);
         if sel_start < sel_end || (includes_newline && start_sel <= line_end) {
@@ -1455,6 +1541,120 @@ fn placed_delta(td: &TextData, layout: &TextLayout) -> Option<(i32, i32)> {
     };
     placed_raster_bounds(width, layout.height, 1.0, angle, td.flip_x, td.flip_y)
         .map(|(dx, dy, _, _)| (dx, dy))
+}
+
+/// The size of the upright raster [`rasterize_stretched`] would make of
+/// straight text, from its layout alone (no glyph is drawn). `None` for text
+/// on a path, empty text, or no font.
+pub fn upright_size(td: &TextData) -> Option<(u32, u32)> {
+    if td.path.is_some() || td.content.trim().is_empty() {
+        return None;
+    }
+    let layout = layout_text(td)?;
+    let stretch_x = if td.stretch_x.is_finite() && td.stretch_x > 0.001 {
+        td.stretch_x
+    } else {
+        1.0
+    };
+    let width = if (stretch_x - 1.0).abs() <= 0.001 {
+        layout.width
+    } else {
+        ((layout.width as f32 * stretch_x).round() as u32).max(1)
+    };
+    Some((width, layout.height))
+}
+
+/// The size of the raster [`rasterize_placed`] would make of straight text
+/// and the delta it would return, from its layout alone: opening a large
+/// text for editing used to draw it whole only to learn where it sits
+/// (0.2–0.9 s, flight recorder 26/10–12/11). `None` for text on a path,
+/// empty text, or no font.
+pub fn placed_size_and_delta(td: &TextData) -> Option<((u32, u32), (i32, i32))> {
+    let (width, height) = upright_size(td)?;
+    let angle = td.rotation_deg.rem_euclid(360.0);
+    if (!angle.is_finite() || angle <= 0.001 || (360.0 - angle) <= 0.001)
+        && !td.flip_x
+        && !td.flip_y
+    {
+        return Some(((width, height), (0, 0)));
+    }
+    placed_raster_bounds(width, height, 1.0, angle, td.flip_x, td.flip_y)
+        .map(|(dx, dy, w, h)| ((w, h), (dx, dy)))
+}
+
+/// Where the type's anchor sits in its upright raster, in raster pixels
+/// (before the stretch): on the first line's baseline, at the left of the
+/// block for left-aligned text, its middle for centred, its right for
+/// right-aligned — the point Photoshop's point type keeps still while it is
+/// typed, resized or realigned. `None` for text on a path or no font.
+pub fn anchor_in_raster(td: &TextData) -> Option<(f32, f32)> {
+    if td.path.is_some() {
+        return None;
+    }
+    let layout = layout_text(td)?;
+    let first = layout.lines.first()?;
+    let widest = layout.lines.iter().map(|l| l.width).fold(0.0_f32, f32::max);
+    let box_width = td.box_width.filter(|w| w.is_finite() && *w >= 1.0);
+    let max_w = box_width.map_or(widest, |w| w.max(widest));
+    let left = first.start_x - align_offset(max_w, first.width, td.align);
+    if box_width.is_some() {
+        // Paragraph type: its box's top-left corner stays still.
+        return Some((left, 0.0));
+    }
+    let x = left + align_offset(max_w, 0.0, td.align);
+    Some((x, first.baseline))
+}
+
+/// `td` drawn `k` times as large: its letters' sizes, their spacing and its
+/// paragraph box together, so the words wrap where they did (not a path the
+/// text is set along). The box left out, a preview drawn larger for the
+/// zoom wrapped after nearly every letter (17/11).
+pub fn scale_letters(td: &mut TextData, k: f32) {
+    td.font_px *= k;
+    td.tracking_px *= k;
+    for g in &mut td.glyph_styles {
+        g.font_px *= k;
+        if let Some(t) = g.tracking_px.as_mut() {
+            *t *= k;
+        }
+    }
+    if let Some(w) = td.box_width.as_mut() {
+        *w *= k;
+    }
+}
+
+/// The words of each line as laid out: a paragraph box's wrapped lines one
+/// by one, else the lines typed. Empty when there is no font.
+pub fn laid_lines(td: &TextData) -> Vec<String> {
+    let Some(layout) = layout_text(td) else {
+        return Vec::new();
+    };
+    let (chars, _) = normalize_nfc_with_style_src(&td.content);
+    layout
+        .lines
+        .iter()
+        .map(|line| {
+            chars
+                .iter()
+                .skip(line.start_char)
+                .take(line.len)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Paragraph type's box in its upright raster, before the stretch: left,
+/// top, width and height. `None` for point type.
+pub fn box_in_raster(td: &TextData) -> Option<(f32, f32, f32, f32)> {
+    let box_width = td.box_width.filter(|w| w.is_finite() && *w >= 1.0)?;
+    if td.path.is_some() {
+        return None;
+    }
+    let layout = layout_text(td)?;
+    let (left, _) = anchor_in_raster(td)?;
+    Some((left, 0.0, box_width, layout.height as f32))
 }
 
 pub fn rasterize_placed(td: &TextData) -> Option<(Rasterized, (i32, i32))> {
@@ -2399,6 +2599,8 @@ mod tests {
                 bold: i == 0,
                 italic: partial.italic,
                 underline: partial.underline,
+                tracking_px: None,
+                line_height: None,
             })
             .collect();
         let partial = rasterize(&partial).expect("font available");
@@ -2427,6 +2629,8 @@ mod tests {
                 bold: partial.bold,
                 italic: partial.italic,
                 underline: i == 0,
+                tracking_px: None,
+                line_height: None,
             })
             .collect();
         let partial = rasterize(&partial).expect("font available");
@@ -2455,6 +2659,8 @@ mod tests {
                 bold: partial.bold,
                 italic: i == 0,
                 underline: partial.underline,
+                tracking_px: None,
+                line_height: None,
             })
             .collect();
         let partial = rasterize(&partial).expect("font available");
@@ -2577,6 +2783,8 @@ mod tests {
                 bold: td.bold,
                 italic: td.italic,
                 underline: td.underline,
+                tracking_px: None,
+                line_height: None,
             })
             .collect();
         let big = rasterize(&td).expect("font available");
@@ -2595,6 +2803,8 @@ mod tests {
             bold: td.bold,
             italic: td.italic,
             underline: td.underline,
+            tracking_px: None,
+            line_height: None,
         }];
         let Some(r) = rasterize(&td) else {
             return;
@@ -2623,6 +2833,8 @@ mod tests {
                 bold: td.bold,
                 italic: td.italic,
                 underline: td.underline,
+                tracking_px: None,
+                line_height: None,
             })
             .collect();
         let total = td.content.chars().count();
@@ -2706,6 +2918,8 @@ mod tests {
                 bold: false,
                 italic: false,
                 underline: false,
+                tracking_px: None,
+                line_height: None,
             })
             .collect();
         let groups = super::text_to_curves(&td, (0, 0));
@@ -2785,6 +2999,149 @@ mod tests {
             let _ = rasterize_placed(&td);
         }
         eprintln!("5 x rasterize_placed: {:?}", t.elapsed());
+    }
+
+    /// Paragraph type wraps its words at the box's width, the box as wide as
+    /// asked whatever the words.
+    #[test]
+    fn paragraph_type_wraps_its_words_in_the_box() {
+        let point = match rasterize(&text("Xin chao cac ban")) {
+            Some(r) => r,
+            None => return, // no font here
+        };
+        let boxed_td = TextData {
+            box_width: Some(120.0),
+            ..text("Xin chao cac ban")
+        };
+        let boxed = rasterize(&boxed_td).expect("raster");
+        assert!(boxed.height > point.height * 3 / 2, "wrapped into lines");
+        let (w, _) = super::upright_size(&boxed_td).expect("size");
+        assert_eq!(w, boxed.width);
+        let (left, top, bw, _) = super::box_in_raster(&boxed_td).expect("a box");
+        assert_eq!((top, bw), (0.0, 120.0));
+        assert!(left > 0.0 && (left * 2.0 + 120.0).ceil() as u32 <= boxed.width + 1);
+        // One word longer than the box still goes on, a piece a line.
+        let long = TextData {
+            box_width: Some(20.0),
+            ..text("Supercalifragilistic")
+        };
+        assert!(rasterize(&long).expect("raster").height > point.height * 3);
+    }
+
+    /// The owner's case (17/11): a box of t's wrapped into three lines, the
+    /// lower two selected. Nothing of the selection shows on the first line,
+    /// and spacing or enlarging the lower two leaves the first where it was.
+    #[test]
+    fn the_lines_below_a_wrap_are_selected_and_spaced_on_their_own() {
+        let td = TextData {
+            box_width: Some(250.0),
+            ..text(&"t".repeat(100))
+        };
+        let Some(before) = super::layout_text(&td) else {
+            return; // no font here
+        };
+        assert!(before.lines.len() >= 3, "wrapped into lines");
+        let second = before.lines[1].start_char;
+        let n = td.content.chars().count();
+        // The selection from the second line's start: no block on the first.
+        let rects = super::selection_rects(&td, second..n).expect("rects");
+        assert!(
+            rects.iter().all(|r| r.y >= before.lines[1].top - 0.5),
+            "nothing drawn on the first line: {rects:?}"
+        );
+        // The caret at the wrap stands at the next line's start.
+        let caret = super::caret_rect(&td, second).expect("caret");
+        assert!((caret.y - before.lines[1].top).abs() < 0.5);
+
+        // The lower lines spaced and some of their letters enlarged.
+        let mut changed = td.clone();
+        changed.ensure_glyph_styles();
+        for g in &mut changed.glyph_styles[second..] {
+            g.line_height = Some(2.5);
+        }
+        for g in &mut changed.glyph_styles[n - 5..n - 2] {
+            g.font_px = 60.0;
+        }
+        let after = super::layout_text(&changed).expect("layout");
+        let (b0, a0) = (&before.lines[0], &after.lines[0]);
+        assert_eq!((a0.start_char, a0.len), (b0.start_char, b0.len));
+        assert!((a0.baseline - b0.baseline).abs() < 0.01 && (a0.top - b0.top).abs() < 0.01);
+        assert!(after.lines[1].baseline > before.lines[1].baseline + 10.0);
+    }
+
+    /// Paragraph type drawn larger or smaller (the editing preview at a zoom)
+    /// wraps where it did: twice as large is twice the size, as many lines.
+    #[test]
+    fn paragraph_type_scaled_wraps_where_it_did() {
+        let td = TextData {
+            box_width: Some(140.0),
+            ..text("Xin chao cac ban than men")
+        };
+        let Some((w, h)) = super::upright_size(&td) else {
+            return; // no font here
+        };
+        let lines = super::laid_lines(&td).len();
+        assert!(lines >= 2);
+        for k in [0.25_f32, 0.5, 2.0, 4.0] {
+            let mut big = td.clone();
+            super::scale_letters(&mut big, k);
+            assert_eq!(super::laid_lines(&big).len(), lines, "k = {k}");
+            let (bw, bh) = super::upright_size(&big).expect("size");
+            let near = |a: u32, b: u32| (a as f32 - b as f32 * k).abs() <= 2.0 + 3.0 * k;
+            assert!(near(bw, w) && near(bh, h), "k = {k}: {bw}x{bh} vs {w}x{h}");
+        }
+    }
+
+    /// Letters with their own tracking spread; a line whose letters ask for
+    /// a larger line height stands further from the line above.
+    #[test]
+    fn letters_carry_their_own_tracking_and_line_height() {
+        let plain_td = text("AB\nCD");
+        let plain = match rasterize(&plain_td) {
+            Some(r) => r,
+            None => return,
+        };
+        let mut spread = plain_td.clone();
+        spread.ensure_glyph_styles();
+        spread.glyph_styles[0].tracking_px = Some(40.0);
+        let spread = rasterize(&spread).expect("raster");
+        assert!(spread.width >= plain.width + 35);
+        let mut tall = plain_td.clone();
+        tall.ensure_glyph_styles();
+        for g in &mut tall.glyph_styles[3..] {
+            g.line_height = Some(3.0);
+        }
+        let tall = rasterize(&tall).expect("raster");
+        assert!(tall.height >= plain.height + 40);
+        // Unset: exactly as before.
+        let mut same = plain_td.clone();
+        same.ensure_glyph_styles();
+        let same = rasterize(&same).expect("raster");
+        assert_eq!((same.width, same.height), (plain.width, plain.height));
+    }
+
+    /// What one keystroke and one click into a text cost (flight recorder
+    /// 26/10–12/11: 0.2–0.9 s while editing text).
+    #[test]
+    #[ignore = "measurement: cargo test --release -p iai-text --lib measure_text_costs -- --ignored --nocapture"]
+    fn measure_text_costs() {
+        for px in [100.0_f32, 300.0, 1000.0] {
+            let td = TextData {
+                font_family: TextFontFamily::Arial,
+                font_px: px,
+                ..text("LẨU XÍ QUÁCH MANG VỀ\nGIAO TẬN NƠI")
+            };
+            let t = std::time::Instant::now();
+            let size = super::placed_size_and_delta(&td);
+            let layout_time = t.elapsed();
+            let t = std::time::Instant::now();
+            let raster = rasterize_placed(&td);
+            let raster_time = t.elapsed();
+            eprintln!(
+                "{px} px: layout {layout_time:?} {size:?}, raster {raster_time:?} {:?}",
+                raster.map(|(r, d)| (r.width, r.height, d))
+            );
+        }
     }
 }
 

@@ -1,4 +1,7 @@
-use super::{LayerAlign, LayerDistribute, MoveTransformAction, UiActions, UiData, modal_flash_btn};
+use super::{
+    BrushParam, LayerAlign, LayerDistribute, MoveTransformAction, UiActions, UiData,
+    modal_flash_btn,
+};
 use crate::core::text::TextAlign;
 use crate::tools::ToolId;
 use egui;
@@ -209,8 +212,8 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         ui.separator();
 
                         match data.tool.active_tool {
-                            ToolId::Brush | ToolId::Pencil => brush_options(ui, data, actions),
-                            ToolId::Eraser => eraser_options(ui, data, actions),
+                            ToolId::Brush | ToolId::Eraser => brush_options(ui, data, actions),
+                            ToolId::Pencil => pencil_options(ui, data, actions),
                             ToolId::Crop => crop_options(ui, data, actions),
                             ToolId::Fill => fill_options(ui, data, actions),
                             ToolId::Gradient => gradient_options(ui, data, actions),
@@ -624,6 +627,9 @@ fn vector_brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
     });
 }
 
+/// Brush and Eraser: the tip preset, then its size and the paint's
+/// opacity / flow / spacing / smoothing. The values are the active tool's
+/// own (the Eraser keeps its tip apart from the Brush).
 fn brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let presets = crate::tools::brush::BRUSH_PRESETS;
     let sel_text = presets
@@ -645,65 +651,21 @@ fn brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         });
 
     ui.separator();
-    ui.label("Size:");
-    let mut size = data.tool.brush_size;
-    if ui
-        .add(
-            egui::DragValue::new(&mut size)
-                .range(1.0..=5000.0)
-                .suffix("px")
-                .speed(0.5),
-        )
-        .changed()
-    {
-        actions.tool.brush_size = Some(size);
-    }
-
+    brush_size_field(ui, data, actions);
     ui.separator();
-    ui.label("Hardness:");
-    let mut hard = data.tool.brush_hardness * 100.0;
-    if ui
-        .add(
-            egui::DragValue::new(&mut hard)
-                .range(0.0..=100.0)
-                .suffix("%")
-                .speed(0.5),
-        )
-        .changed()
-    {
-        actions.tool.brush_hardness = Some(hard / 100.0);
+    if data.tool.active_tool == ToolId::Brush {
+        brush_mode_field(ui, data, actions);
+        ui.separator();
     }
-
+    if let Some(v) = percent_field(ui, "Hardness:", data.tool.brush_hardness, 0.0) {
+        actions.tool.brush.push(BrushParam::Hardness(v));
+    }
     ui.separator();
-    ui.label("Opacity:");
-    let mut opacity = data.tool.brush_opacity * 100.0;
-    if ui
-        .add(
-            egui::DragValue::new(&mut opacity)
-                .range(1.0..=100.0)
-                .suffix("%")
-                .speed(0.5),
-        )
-        .changed()
-    {
-        actions.tool.brush_opacity = Some(opacity / 100.0);
-    }
-
+    brush_opacity_field(ui, data, actions);
     ui.separator();
-    ui.label("Flow:");
-    let mut flow = data.tool.brush_flow * 100.0;
-    if ui
-        .add(
-            egui::DragValue::new(&mut flow)
-                .range(1.0..=100.0)
-                .suffix("%")
-                .speed(0.5),
-        )
-        .changed()
-    {
-        actions.tool.brush_flow = Some(flow / 100.0);
+    if let Some(v) = percent_field(ui, "Flow:", data.tool.brush_flow, 1.0) {
+        actions.tool.brush.push(BrushParam::Flow(v));
     }
-
     ui.separator();
     ui.label("Spacing:");
     let mut spacing = data.tool.brush_spacing * 100.0;
@@ -716,69 +678,89 @@ fn brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         )
         .changed()
     {
-        actions.tool.brush_spacing = Some(spacing / 100.0);
+        actions
+            .tool
+            .brush
+            .push(BrushParam::Spacing(spacing / 100.0));
     }
-
     ui.separator();
-    ui.label("Smooth:");
-    let mut smoothing = data.tool.brush_smoothing * 100.0;
-    if ui
-        .add(
-            egui::DragValue::new(&mut smoothing)
-                .range(0.0..=100.0)
-                .suffix("%")
-                .speed(0.5),
-        )
-        .changed()
-    {
-        actions.tool.brush_smoothing = Some(smoothing / 100.0);
+    if let Some(v) = percent_field(ui, "Smooth:", data.tool.brush_smoothing, 0.0) {
+        actions.tool.brush.push(BrushParam::Smoothing(v));
+    }
+    if data.tool.active_tool == ToolId::Brush {
+        ui.separator();
+        let on = data.tool.brush_airbrush;
+        if ui
+            .selectable_label(on, ph::SPRAY_BOTTLE)
+            .on_hover_text("Airbrush: giữ chuột đứng yên thì màu tiếp tục đậm lên")
+            .clicked()
+        {
+            actions.tool.brush.push(BrushParam::Airbrush(!on));
+        }
     }
 }
 
-fn eraser_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+/// The Brush's / Pencil's paint mode (Photoshop's Mode).
+fn brush_mode_field(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    ui.label("Mode:");
+    let current = data.tool.brush_mode;
+    egui::ComboBox::from_id_salt("brush_mode")
+        .selected_text(current.name())
+        .width(104.0)
+        .show_ui(ui, |ui| {
+            for m in crate::tools::brush::BrushMode::all() {
+                if ui.selectable_label(m == current, m.name()).clicked() && m != current {
+                    actions.tool.brush.push(BrushParam::Mode(m));
+                }
+            }
+        });
+}
+
+/// The Pencil draws with the Brush's size, opacity and colour, hard-edged:
+/// nothing else of the Brush's applies to it.
+fn pencil_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    brush_size_field(ui, data, actions);
+    ui.separator();
+    brush_mode_field(ui, data, actions);
+    ui.separator();
+    brush_opacity_field(ui, data, actions);
+}
+
+fn brush_size_field(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     ui.label("Size:");
     let mut size = data.tool.brush_size;
     if ui
         .add(
             egui::DragValue::new(&mut size)
-                .range(1.0..=5000.0)
+                .range(1.0..=crate::tools::brush::MAX_TIP_SIZE)
                 .suffix("px")
                 .speed(0.5),
         )
         .changed()
     {
-        actions.tool.brush_size = Some(size);
+        actions.tool.brush.push(BrushParam::Size(size));
     }
+}
 
-    ui.separator();
-    ui.label("Hardness:");
-    let mut hard = data.tool.brush_hardness * 100.0;
-    if ui
-        .add(
-            egui::DragValue::new(&mut hard)
-                .range(0.0..=100.0)
-                .suffix("%")
-                .speed(0.5),
-        )
-        .changed()
-    {
-        actions.tool.brush_hardness = Some(hard / 100.0);
+fn brush_opacity_field(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    if let Some(v) = percent_field(ui, "Opacity:", data.tool.brush_opacity, 1.0) {
+        actions.tool.brush.push(BrushParam::Opacity(v));
     }
+}
 
-    ui.separator();
-    ui.label("Opacity:");
-    let mut opacity = data.tool.brush_opacity * 100.0;
-    if ui
-        .add(
-            egui::DragValue::new(&mut opacity)
-                .range(1.0..=100.0)
-                .suffix("%")
-                .speed(0.5),
-        )
-        .changed()
-    {
-        actions.tool.brush_opacity = Some(opacity / 100.0);
-    }
+/// A labelled 0–100 % drag value over a 0..1 setting; the new value when it
+/// changed.
+fn percent_field(ui: &mut egui::Ui, label: &str, value: f32, min_percent: f32) -> Option<f32> {
+    ui.label(label);
+    let mut v = value * 100.0;
+    ui.add(
+        egui::DragValue::new(&mut v)
+            .range(min_percent..=100.0)
+            .suffix("%")
+            .speed(0.5),
+    )
+    .changed()
+    .then_some(v / 100.0)
 }
 
 fn clone_tool_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, is_healing: bool) {
@@ -2798,11 +2780,11 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     super::panels::font_family_field(ui, data, actions, 178.0);
     // Face / style (Regular, Bold, …) of the chosen family.
     egui::ComboBox::from_id_salt("text_face_combo")
-        .selected_text(data.tool.text_font_family.style_name())
+        .selected_text(data.tool.text_bar.font_family.style_name())
         .width(92.0)
         .show_ui(ui, |ui| {
-            for face in data.tool.text_font_family.faces() {
-                let selected = face.style_name() == data.tool.text_font_family.style_name();
+            for face in data.tool.text_bar.font_family.faces() {
+                let selected = face.style_name() == data.tool.text_bar.font_family.style_name();
                 if ui.selectable_label(selected, face.style_name()).clicked() {
                     actions.tool.set_text_font_family = Some(face);
                     // The chosen face already carries its real weight/slant; avoid
@@ -2815,7 +2797,7 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
     ui.separator();
     ui.label("Size:");
-    let mut px = data.tool.text_font_px;
+    let mut px = data.tool.text_bar.font_px;
     if ui
         .add(
             egui::DragValue::new(&mut px)
@@ -2830,12 +2812,39 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     {
         actions.tool.set_text_font_px = Some(px);
     }
+    // The same size in points, as Photoshop gives it, at the picture's own
+    // resolution (12 pt on a 300 ppi page is 50 px). Not shown at 72 ppi,
+    // where the two are one.
+    let dpi = data.doc.canvas_dpi;
+    if dpi.is_finite() && dpi > 1.0 && (dpi - 72.0).abs() > 0.5 {
+        let mut pt = px * 72.0 / dpi;
+        let min_pt = crate::core::text::MIN_EDITABLE_FONT_PX * 72.0 / dpi;
+        let max_pt = crate::core::text::MAX_EDITABLE_FONT_PX * 72.0 / dpi;
+        if ui
+            .add(
+                egui::DragValue::new(&mut pt)
+                    .range(min_pt..=max_pt)
+                    .max_decimals(1)
+                    .suffix(" pt")
+                    .speed(0.2),
+            )
+            .on_hover_text(format!("Size in points at {dpi:.0} ppi"))
+            .changed()
+        {
+            actions.tool.set_text_font_px = Some(pt * dpi / 72.0);
+        }
+    }
 
     ui.separator();
     for (selected, icon, tip, target) in [
-        (data.tool.text_bold, ph::TEXT_B, "Bold", 0u8),
-        (data.tool.text_italic, ph::TEXT_ITALIC, "Italic", 1),
-        (data.tool.text_underline, ph::TEXT_UNDERLINE, "Underline", 2),
+        (data.tool.text_bar.bold, ph::TEXT_B, "Bold", 0u8),
+        (data.tool.text_bar.italic, ph::TEXT_ITALIC, "Italic", 1),
+        (
+            data.tool.text_bar.underline,
+            ph::TEXT_UNDERLINE,
+            "Underline",
+            2,
+        ),
     ] {
         let btn = egui::Button::new(top_options_icon(icon))
             .fill(if selected {
@@ -2846,9 +2855,9 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             .min_size(egui::vec2(26.0, 22.0));
         if ui.add(btn).on_hover_text(tip).clicked() {
             match target {
-                0 => actions.tool.set_text_bold = Some(!data.tool.text_bold),
-                1 => actions.tool.set_text_italic = Some(!data.tool.text_italic),
-                _ => actions.tool.set_text_underline = Some(!data.tool.text_underline),
+                0 => actions.tool.set_text_bold = Some(!data.tool.text_bar.bold),
+                1 => actions.tool.set_text_italic = Some(!data.tool.text_bar.italic),
+                _ => actions.tool.set_text_underline = Some(!data.tool.text_bar.underline),
             }
         }
     }
@@ -2875,9 +2884,9 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     ui.separator();
     // Colour swatch — opens the text-colour picker (target 2).
     let fill = egui::Color32::from_rgb(
-        data.tool.text_color[0],
-        data.tool.text_color[1],
-        data.tool.text_color[2],
+        data.tool.text_bar.color[0],
+        data.tool.text_bar.color[1],
+        data.tool.text_bar.color[2],
     );
     if ui
         .add(
@@ -2896,15 +2905,15 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     ui.separator();
     // Line height: icon + value + a ▾ list of common presets.
     ui.label(top_options_icon(ph::ARROWS_OUT_LINE_VERTICAL).color(pal.text_secondary))
-        .on_hover_text("Line height");
-    let mut line_height = data.tool.text_line_height;
+        .on_hover_text("Line height (of the selected letters while some are selected)");
+    let mut line_height = data.tool.text_bar.line_height;
     if ui
         .add(
             egui::DragValue::new(&mut line_height)
                 .range(0.5..=4.0)
                 .speed(0.02),
         )
-        .on_hover_text("Line height")
+        .on_hover_text("Line height (of the selected letters while some are selected)")
         .changed()
     {
         actions.tool.set_text_line_height = Some(line_height);
@@ -2912,7 +2921,7 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if let Some(v) = crate::ui::panels::text_preset_menu(
         ui,
         "text_line_height_presets",
-        data.tool.text_line_height,
+        data.tool.text_bar.line_height,
         &[3.0, 2.5, 2.0, 1.5, 1.2, 1.0, 0.8, 0.6, 0.5],
         |v| format!("{v:.2}"),
     ) {
@@ -2922,8 +2931,10 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     ui.separator();
     // Tracking (letter spacing): icon + value + presets.
     ui.label(top_options_icon(ph::TEXT_INDENT).color(pal.text_secondary))
-        .on_hover_text("Tracking (letter spacing)");
-    let mut tracking = data.tool.text_tracking_px;
+        .on_hover_text(
+            "Tracking: letter spacing (of the selected letters while some are selected)",
+        );
+    let mut tracking = data.tool.text_bar.tracking_px;
     if ui
         .add(
             egui::DragValue::new(&mut tracking)
@@ -2931,7 +2942,7 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 .suffix(" px")
                 .speed(0.2),
         )
-        .on_hover_text("Tracking (letter spacing)")
+        .on_hover_text("Tracking: letter spacing (of the selected letters while some are selected)")
         .changed()
     {
         actions.tool.set_text_tracking_px = Some(tracking);
@@ -2939,7 +2950,7 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if let Some(v) = crate::ui::panels::text_preset_menu(
         ui,
         "text_tracking_presets",
-        data.tool.text_tracking_px,
+        data.tool.text_bar.tracking_px,
         &[
             200.0, 100.0, 75.0, 50.0, 25.0, 10.0, 5.0, 0.0, -5.0, -10.0, -25.0, -50.0, -75.0,
             -100.0,

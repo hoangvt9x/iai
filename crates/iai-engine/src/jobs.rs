@@ -138,6 +138,10 @@ pub(crate) struct Running {
     ctx: JobCtx,
     rx: Receiver<WorkResult>,
     started: Instant,
+    /// Applied in its turn (see [`Jobs::apply_in_turn`]).
+    in_turn: bool,
+    /// Its work's result, kept while it waits for its turn.
+    done: Option<WorkResult>,
 }
 
 /// A job whose work has ended, to apply.
@@ -208,8 +212,22 @@ impl Jobs {
             ctx,
             rx,
             started: Instant::now(),
+            in_turn: false,
+            done: None,
         });
         Ok(id)
+    }
+
+    /// Hold `id`'s result, once its work ends, until every job started
+    /// before it that is also held in turn has ended (and been handed out).
+    pub fn apply_in_turn(&mut self, id: JobId) -> bool {
+        match self.running.iter_mut().find(|r| r.id == id) {
+            Some(r) => {
+                r.in_turn = true;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Run `job`'s work here, now.
@@ -231,32 +249,49 @@ impl Jobs {
         }
     }
 
-    /// The jobs whose work has ended, taken out of the running list.
+    /// The jobs whose work has ended, taken out of the running list. A job
+    /// held in turn whose work ended stays until the in-turn jobs started
+    /// before it have all ended.
     pub fn take_ended(&mut self) -> Vec<Ended> {
         let mut ended = Vec::new();
+        // An in-turn job started earlier is still at work: later in-turn
+        // jobs wait for it (`running` is in the order started).
+        let mut earlier_turn_open = false;
         let mut i = 0;
-        while let Some(r) = self.running.get(i) {
-            let got = match r.rx.try_recv() {
-                Ok(Ok(outcome)) => Some(outcome),
-                Ok(Err(payload)) => Some(Err(panicked(r.command, &panic_text(payload.as_ref())))),
-                Err(TryRecvError::Empty) => None,
-                Err(TryRecvError::Disconnected) => Some(Err(CmdError::internal(format!(
+        while let Some(r) = self.running.get_mut(i) {
+            if r.done.is_none() {
+                r.done = match r.rx.try_recv() {
+                    Ok(out) => Some(out),
+                    Err(TryRecvError::Empty) => None,
+                    Err(TryRecvError::Disconnected) => Some(Ok(Err(CmdError::internal(format!(
+                        "the worker of `{}` ended without an answer",
+                        r.command
+                    ))))),
+                };
+            }
+            let waits = r.in_turn && earlier_turn_open;
+            if r.in_turn && r.done.is_none() {
+                earlier_turn_open = true;
+            }
+            if waits || r.done.is_none() {
+                i = i.saturating_add(1);
+                continue;
+            }
+            let r = self.running.remove(i);
+            let outcome = match r.done {
+                Some(Ok(outcome)) => outcome,
+                Some(Err(payload)) => Err(panicked(r.command, &panic_text(payload.as_ref()))),
+                None => Err(CmdError::internal(format!(
                     "the worker of `{}` ended without an answer",
                     r.command
-                )))),
+                ))),
             };
-            match got {
-                Some(outcome) => {
-                    let r = self.running.remove(i);
-                    ended.push(Ended {
-                        id: r.id,
-                        command: r.command,
-                        cancelled: r.ctx.cancelled(),
-                        outcome,
-                    });
-                }
-                None => i = i.saturating_add(1),
-            }
+            ended.push(Ended {
+                id: r.id,
+                command: r.command,
+                cancelled: r.ctx.cancelled(),
+                outcome,
+            });
         }
         ended
     }
@@ -299,4 +334,60 @@ pub(crate) fn panicked(command: &str, text: &str) -> CmdError {
         "`{command}` panicked ({text}); nothing was changed"
     ))
     .vi("Lỗi trong chương trình; ảnh được giữ nguyên")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::Sender;
+
+    /// A job whose work ends when `go` is sent something, answering `n`.
+    fn waiting_job(n: u64) -> (Job<Value>, Sender<()>) {
+        let (go, wait) = mpsc::channel::<()>();
+        let job = Job {
+            doc: None,
+            label_vi: String::new(),
+            work: Box::new(move |_cx: &JobCtx| {
+                let _ = wait.recv();
+                Ok(
+                    Box::new(move |_s: &mut crate::session::Session<'_>| Ok(Value::from(n)))
+                        as Apply<Value>,
+                )
+            }),
+        };
+        (job, go)
+    }
+
+    /// Poll until `count` jobs have been handed out (or a few seconds pass).
+    fn take(jobs: &mut Jobs, count: usize) -> Vec<JobId> {
+        let start = Instant::now();
+        let mut out = Vec::new();
+        while out.len() < count && start.elapsed() < std::time::Duration::from_secs(10) {
+            out.extend(jobs.take_ended().into_iter().map(|e| e.id));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        out
+    }
+
+    #[test]
+    fn jobs_held_in_turn_end_in_the_order_started() {
+        let mut jobs = Jobs::default();
+        let (first, go_first) = waiting_job(1);
+        let (second, go_second) = waiting_job(2);
+        let (free, go_free) = waiting_job(3);
+        let a = jobs.spawn("file.open", first).expect("a thread");
+        let b = jobs.spawn("file.open", second).expect("a thread");
+        let c = jobs.spawn("other", free).expect("a thread");
+        assert!(jobs.apply_in_turn(a) && jobs.apply_in_turn(b));
+        // The second and the free job end first: only the free one is handed
+        // out; the second waits for the first.
+        go_second.send(()).expect("worker");
+        go_free.send(()).expect("worker");
+        assert_eq!(take(&mut jobs, 1), vec![c]);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(jobs.take_ended().is_empty());
+        go_first.send(()).expect("worker");
+        assert_eq!(take(&mut jobs, 2), vec![a, b]);
+        assert!(!jobs.busy());
+    }
 }

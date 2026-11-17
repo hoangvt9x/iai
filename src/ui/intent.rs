@@ -25,23 +25,43 @@ pub enum PdfExportScope {
 /// Parse a 1-based page range such as `1-3, 5, 8-10` into unique, ascending
 /// zero-based indices. Keeping this beside [`PdfExportScope`] lets both the
 /// dialog and the export backend share exactly the same validation rules.
+///
+/// Typed as people type it: `;` or spaces separate as `,` does, a dash may
+/// be a long one (`1–3`, as Word makes it) or have spaces around it, and a
+/// separator left at the end is no error. What is wrong is said in
+/// Vietnamese, naming the part.
 pub fn parse_pdf_page_range(input: &str, page_count: usize) -> Result<Vec<usize>, String> {
     if page_count == 0 {
-        return Err("Tài liệu không có trang để xuất".to_string());
+        return Err("Tài liệu không có trang nào".to_string());
     }
-    if input.trim().is_empty() {
-        return Err("Hãy nhập số trang, ví dụ: 1-3,5".to_string());
-    }
+    let normalized: String = input
+        .chars()
+        .map(|c| match c {
+            '–' | '—' | '−' => '-',
+            ';' => ',',
+            c => c,
+        })
+        .collect();
+    // "1 - 3" is "1-3".
+    let normalized = normalized
+        .split('-')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("-");
 
     let mut selected = vec![false; page_count];
-    for part in input.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            return Err("Phạm vi trang không hợp lệ".to_string());
-        }
+    let mut any = false;
+    for part in normalized
+        .split(',')
+        .flat_map(str::split_whitespace)
+        .filter(|part| !part.is_empty())
+    {
         let (start, end) = if let Some((a, b)) = part.split_once('-') {
+            if a.is_empty() || b.is_empty() {
+                return Err(format!("Phạm vi “{part}” còn thiếu số trang (ví dụ: 1-3)"));
+            }
             if b.contains('-') {
-                return Err(format!("Phạm vi “{part}” không hợp lệ"));
+                return Err(format!("Phạm vi “{part}” không hợp lệ (ví dụ: 1-3)"));
             }
             (
                 parse_page_number(a, page_count)?,
@@ -52,11 +72,17 @@ pub fn parse_pdf_page_range(input: &str, page_count: usize) -> Result<Vec<usize>
             (page, page)
         };
         if start > end {
-            return Err(format!("Phạm vi “{part}” phải theo thứ tự tăng dần"));
+            return Err(format!(
+                "Phạm vi “{part}” phải viết từ trang nhỏ tới trang lớn"
+            ));
         }
         for page in start..=end {
             selected[page] = true;
         }
+        any = true;
+    }
+    if !any {
+        return Err("Hãy nhập số trang, ví dụ: 1-3, 5".to_string());
     }
     Ok(selected
         .into_iter()
@@ -69,9 +95,11 @@ fn parse_page_number(text: &str, page_count: usize) -> Result<usize, String> {
     let number = text
         .trim()
         .parse::<usize>()
-        .map_err(|_| format!("Số trang “{}” không hợp lệ", text.trim()))?;
+        .map_err(|_| format!("“{}” không phải số trang", text.trim()))?;
     if !(1..=page_count).contains(&number) {
-        return Err(format!("Trang {number} nằm ngoài phạm vi 1-{page_count}"));
+        return Err(format!(
+            "Không có trang {number}: tài liệu chỉ có {page_count} trang"
+        ));
     }
     Ok(number - 1)
 }
@@ -206,6 +234,20 @@ pub struct LayerIntent {
     pub toggle_group_expanded: Option<usize>,
     pub set_paint_target: Option<(usize, PaintTarget)>,
 }
+/// One change to the painting tools' options (the active tool's: the
+/// Eraser keeps its own tip). Size in px; the shares 0..1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BrushParam {
+    Size(f32),
+    Hardness(f32),
+    Opacity(f32),
+    Flow(f32),
+    Spacing(f32),
+    Smoothing(f32),
+    Mode(crate::tools::brush::BrushMode),
+    Airbrush(bool),
+}
+
 /// Tool selection, options-bar edits, transform/crop/text session commands.
 #[derive(Default, PartialEq)]
 pub struct ToolIntent {
@@ -234,18 +276,15 @@ pub struct ToolIntent {
     /// Canvas click outside the text being edited. Under the strict modal
     /// lock this is refused (bell) — the session ends only via Commit/Cancel.
     pub text_canvas_click: Option<(f32, f32)>,
-    /// Drag the active text overlay to a new canvas-space origin.
-    pub text_move_origin: Option<(i32, i32)>,
+    /// The open type's frame dragged: moved to a new canvas-space origin,
+    /// or its paragraph box made a new width.
+    pub text_frame: Option<TextFrameAsk>,
     /// UI acknowledged the focus request → app clears its one-shot flag.
     pub consume_text_focus: bool,
     pub text_drag_handle_hovered: bool,
     pub text_panel_hovered: bool,
-    pub brush_size: Option<f32>,
-    pub brush_hardness: Option<f32>,
-    pub brush_opacity: Option<f32>,
-    pub brush_spacing: Option<f32>,
-    pub brush_smoothing: Option<f32>,
-    pub brush_flow: Option<f32>,
+    /// Changes to the Brush / Pencil / Eraser options, in the order made.
+    pub brush: Vec<BrushParam>,
     /// Apply a built-in brush preset by index into BRUSH_PRESETS.
     pub select_brush_preset: Option<usize>,
     /// Close the right-click brush popup.
@@ -1055,4 +1094,45 @@ mod pdf_page_range_tests {
         assert!(parse_pdf_page_range("1,6", 5).is_err());
         assert!(parse_pdf_page_range("1-2-3", 5).is_err());
     }
+
+    /// 17/11/2026: typed as people type it, the way the Print dialog of an
+    /// opened PDF takes it.
+    #[test]
+    fn takes_pages_as_people_type_them() {
+        let ok = |text: &str| parse_pdf_page_range(text, 10).unwrap();
+        assert_eq!(ok("1-3, 5, 8"), vec![0, 1, 2, 4, 7]);
+        assert_eq!(ok(" 1 - 3 ; 5 "), vec![0, 1, 2, 4]);
+        assert_eq!(ok("1–3,5"), vec![0, 1, 2, 4], "Word's long dash");
+        assert_eq!(ok("2 4 6"), vec![1, 3, 5], "spaces between pages");
+        assert_eq!(ok("1,2,"), vec![0, 1], "a comma left at the end");
+        assert_eq!(ok("7"), vec![6]);
+        assert_eq!(ok("1-10"), (0..10).collect::<Vec<_>>());
+        assert_eq!(ok("9-9"), vec![8]);
+    }
+
+    #[test]
+    fn says_in_vietnamese_what_is_wrong() {
+        let err = |text: &str| parse_pdf_page_range(text, 5).unwrap_err();
+        assert_eq!(err("6"), "Không có trang 6: tài liệu chỉ có 5 trang");
+        assert_eq!(err("2-8"), "Không có trang 8: tài liệu chỉ có 5 trang");
+        assert_eq!(err("0"), "Không có trang 0: tài liệu chỉ có 5 trang");
+        assert_eq!(err("a"), "“a” không phải số trang");
+        assert_eq!(err("1.5"), "“1.5” không phải số trang");
+        assert_eq!(
+            err("4-2"),
+            "Phạm vi “4-2” phải viết từ trang nhỏ tới trang lớn"
+        );
+        assert_eq!(err("3-"), "Phạm vi “3-” còn thiếu số trang (ví dụ: 1-3)");
+        assert_eq!(err(" , ;"), "Hãy nhập số trang, ví dụ: 1-3, 5");
+        assert_eq!(err(""), "Hãy nhập số trang, ví dụ: 1-3, 5");
+    }
+}
+
+/// What a drag on the open type's frame asks (see `ToolIntent::text_frame`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TextFrameAsk {
+    /// Its upright origin to here, canvas pixels.
+    Move((i32, i32)),
+    /// Its paragraph box this wide, canvas pixels before the stretch.
+    BoxWidth(f32),
 }

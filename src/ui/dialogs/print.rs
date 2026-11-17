@@ -438,12 +438,22 @@ pub(crate) fn print_printable_mode_label(
 const PAGES_MODE: &str = "print_pages_mode";
 const PAGES_TEXT: &str = "print_pages_text";
 
+/// How many pages the tab in front has and which one is in front (0 being
+/// the first): an opened PDF's pages as its page bar counts them, otherwise
+/// the artboards.
+fn printable_pages(data: &UiData) -> (usize, usize) {
+    match &data.doc.pdf_nav {
+        Some(nav) => (nav.count, nav.index),
+        None => (data.doc.page_count, data.doc.active_artboard),
+    }
+}
+
 /// The pages the print range asks for: the page in front for a document of
 /// one page; otherwise what the "Trang in" group says. An error when the
 /// pages typed are not pages of the document.
 fn chosen_pages(ctx: &egui::Context, data: &UiData) -> Result<crate::ui::PrintPages, String> {
     use crate::ui::PrintPages;
-    let count = data.doc.page_count;
+    let (count, _) = printable_pages(data);
     if count <= 1 {
         return Ok(PrintPages::Current);
     }
@@ -461,10 +471,10 @@ fn chosen_pages(ctx: &egui::Context, data: &UiData) -> Result<crate::ui::PrintPa
     }
 }
 
-/// Corel's print range, for a document of several pages: the page in front,
-/// every page, or the pages typed ("1-3, 5").
+/// Corel's print range, for a document of several pages (an opened PDF
+/// too): the page in front, every page, or the pages typed ("1-3, 5").
 fn page_range_group(ui: &mut egui::Ui, data: &UiData) {
-    let count = data.doc.page_count;
+    let (count, current) = printable_pages(data);
     if count <= 1 {
         return;
     }
@@ -480,7 +490,7 @@ fn page_range_group(ui: &mut egui::Ui, data: &UiData) {
         ui.radio_value(
             &mut mode,
             0,
-            format!("Trang đang xem (trang {})", data.doc.active_artboard + 1),
+            format!("Trang đang xem (trang {})", current + 1),
         );
         ui.radio_value(&mut mode, 1, format!("Tất cả {count} trang"));
         ui.horizontal(|ui| {
@@ -494,14 +504,33 @@ fn page_range_group(ui: &mut egui::Ui, data: &UiData) {
                 mode = 2;
             }
         });
-        if mode == 2
-            && !text.trim().is_empty()
-            && let Err(why) = crate::ui::parse_pdf_page_range(&text, count)
-        {
+        if mode == 2 && !text.trim().is_empty() {
+            match crate::ui::parse_pdf_page_range(&text, count) {
+                Err(why) => {
+                    ui.label(
+                        egui::RichText::new(why)
+                            .color(egui::Color32::from_rgb(230, 120, 90))
+                            .size(10.0),
+                    );
+                }
+                Ok(pages) => {
+                    ui.label(
+                        egui::RichText::new(format!("Sẽ in {} trang", pages.len()))
+                            .color(egui::Color32::GRAY)
+                            .size(10.0),
+                    );
+                }
+            }
+        }
+        // Several copies of several pages come out a set at a time.
+        if mode != 0 && data.print.print_copies > 1 {
             ui.label(
-                egui::RichText::new(why)
-                    .color(egui::Color32::from_rgb(230, 120, 90))
-                    .size(10.0),
+                egui::RichText::new(format!(
+                    "In {} bộ, mỗi bộ đủ các trang theo thứ tự",
+                    data.print.print_copies
+                ))
+                .color(egui::Color32::GRAY)
+                .size(10.0),
             );
         }
     });
@@ -848,6 +877,83 @@ mod tests {
         assert!(place_of(&texts, "Tất cả 1 trang").is_none());
     }
 
+    /// 17/11/2026: an opened PDF of several pages printed only the page in
+    /// front (it is one artboard, its pages are the page bar's). Its pages
+    /// are now the print range's, counted as its page bar counts them.
+    #[test]
+    fn an_opened_pdf_of_several_pages_prints_the_pages_asked_for() {
+        use crate::ui::PrintPages;
+        let ctx = egui::Context::default();
+        let mut data = data_with_a_printer();
+        data.doc.page_count = 1;
+        data.doc.active_artboard = 0;
+        data.doc.pdf_nav = Some(crate::ui::PdfNavData {
+            index: 2,
+            count: 4,
+            page_names: std::sync::Arc::new(Vec::new()),
+            source_name: "hop-dong.pdf".to_string(),
+            global_clear_count: 0,
+            global_clear_redo_count: 0,
+        });
+        draw(&ctx, &data, vec![]);
+        let (_, texts) = draw(&ctx, &data, vec![]);
+        assert!(place_of(&texts, "Trang đang xem (trang 3)").is_some());
+        let print = place_of(&texts, "  Print  ").expect("the Print button");
+        assert_eq!(
+            click(&ctx, &data, print).print.print_send,
+            Some(PrintPages::Current)
+        );
+
+        let all = place_of(&texts, "Tất cả 4 trang").expect("every page");
+        click(&ctx, &data, all);
+        let (_, texts) = draw(&ctx, &data, vec![]);
+        assert_eq!(
+            click(&ctx, &data, place_of(&texts, "  Print  ").unwrap())
+                .print
+                .print_send,
+            Some(PrintPages::Pages(vec![0, 1, 2, 3]))
+        );
+
+        ctx.data_mut(|d| {
+            d.insert_temp(egui::Id::new(PAGES_MODE), 2u8);
+            d.insert_temp(egui::Id::new(PAGES_TEXT), "2-3, 1".to_string());
+        });
+        let (_, texts) = draw(&ctx, &data, vec![]);
+        assert!(
+            place_of(&texts, "Sẽ in 3 trang").is_some(),
+            "what it will print"
+        );
+        assert_eq!(
+            click(&ctx, &data, place_of(&texts, "  Print  ").unwrap())
+                .print
+                .print_send,
+            Some(PrintPages::Pages(vec![0, 1, 2]))
+        );
+
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(PAGES_TEXT), "3-6".to_string()));
+        let (_, texts) = draw(&ctx, &data, vec![]);
+        assert!(
+            texts
+                .iter()
+                .any(|(t, _)| t == "Không có trang 6: tài liệu chỉ có 4 trang"),
+            "the reason is said"
+        );
+        assert_eq!(
+            click(&ctx, &data, place_of(&texts, "  Print  ").unwrap())
+                .print
+                .print_send,
+            None,
+            "pages it does not have send nothing"
+        );
+
+        // A PDF of one page has no range to choose.
+        if let Some(nav) = data.doc.pdf_nav.as_mut() {
+            (nav.index, nav.count) = (0, 1);
+        }
+        let (_, texts) = draw(&ctx, &data, vec![]);
+        assert!(place_of(&texts, "Tất cả 1 trang").is_none());
+    }
+
     #[test]
     fn an_ordinary_print_leaves_the_print_button_and_offers_no_stop() {
         let ctx = egui::Context::default();
@@ -937,5 +1043,41 @@ mod tests {
         image
             .save(std::path::Path::new(&dir).join("print_nhieu_trang.png"))
             .unwrap();
+    }
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the dialog of an opened PDF of
+    /// twelve pages, page 3 in front, pages typed, two copies, is drawn into
+    /// `print_pdf_nhieu_trang.png` there, and one typed wrong into
+    /// `print_pdf_sai_trang.png`.
+    #[test]
+    #[ignore]
+    fn probe_dialog_snapshot_of_a_pdf_print_range() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        let mut data = data_with_a_printer();
+        data.print.print_copies = 2;
+        data.doc.pdf_nav = Some(crate::ui::PdfNavData {
+            index: 2,
+            count: 12,
+            page_names: std::sync::Arc::new(Vec::new()),
+            source_name: "hop-dong.pdf".to_string(),
+            global_clear_count: 0,
+            global_clear_redo_count: 0,
+        });
+        for (typed, file) in [
+            ("1-3, 5, 8", "print_pdf_nhieu_trang.png"),
+            ("2-15", "print_pdf_sai_trang.png"),
+        ] {
+            let image = crate::ui::snapshot::render(SCREEN.x, SCREEN.y, 1.0, None, |ctx| {
+                ctx.data_mut(|d| {
+                    d.insert_temp(egui::Id::new(PAGES_MODE), 2u8);
+                    d.insert_temp(egui::Id::new(PAGES_TEXT), typed.to_string());
+                });
+                let mut actions = UiActions::default();
+                print_dialog(ctx, &data, &mut actions);
+            });
+            image.save(std::path::Path::new(&dir).join(file)).unwrap();
+        }
     }
 }

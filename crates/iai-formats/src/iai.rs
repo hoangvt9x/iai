@@ -1866,7 +1866,7 @@ fn text_to_json(td: &iai_text::text::TextData) -> serde_json::Value {
             {
                 j += 1;
             }
-            runs.push(serde_json::json!({
+            let mut run = serde_json::json!({
                 "n": j - i,
                 "color": s.color,
                 "font_px": s.font_px,
@@ -1874,7 +1874,15 @@ fn text_to_json(td: &iai_text::text::TextData) -> serde_json::Value {
                 "bold": s.bold,
                 "italic": s.italic,
                 "underline": s.underline,
-            }));
+            });
+            // A letter's own tracking / line height (written only when set).
+            if let Some(t) = s.tracking_px {
+                run["tracking_px"] = t.into();
+            }
+            if let Some(l) = s.line_height {
+                run["line_height"] = l.into();
+            }
+            runs.push(run);
             i = j;
         }
         obj["glyph_runs"] = serde_json::Value::Array(runs);
@@ -1890,6 +1898,9 @@ fn text_to_json(td: &iai_text::text::TextData) -> serde_json::Value {
     }
     if let (Some(fill), Some(o)) = (fill, obj.as_object_mut()) {
         o.insert("fill".into(), fill);
+    }
+    if let Some(w) = td.box_width {
+        obj["box_width"] = w.into();
     }
     obj
 }
@@ -2015,6 +2026,8 @@ fn json_to_text_data(v: &serde_json::Value) -> Option<iai_text::text::TextData> 
             let rbold = run["bold"].as_bool().unwrap_or(bold);
             let ritalic = run["italic"].as_bool().unwrap_or(italic);
             let runderline = run["underline"].as_bool().unwrap_or(underline);
+            let rtracking = run["tracking_px"].as_f64().map(|t| t as f32);
+            let rline = run["line_height"].as_f64().map(|l| l as f32);
             for _ in 0..n {
                 glyph_styles.push(iai_text::text::GlyphStyle {
                     color: rc,
@@ -2023,6 +2036,8 @@ fn json_to_text_data(v: &serde_json::Value) -> Option<iai_text::text::TextData> 
                     bold: rbold,
                     italic: ritalic,
                     underline: runderline,
+                    tracking_px: rtracking,
+                    line_height: rline,
                 });
             }
         }
@@ -2050,6 +2065,10 @@ fn json_to_text_data(v: &serde_json::Value) -> Option<iai_text::text::TextData> 
         glyph_styles,
         path: json_to_text_path(&v["path"]),
         fill: json_to_text_fill(&v["fill"]),
+        box_width: v["box_width"]
+            .as_f64()
+            .map(|w| w as f32)
+            .filter(|w| w.is_finite() && *w >= 1.0),
     })
 }
 
@@ -3863,9 +3882,12 @@ mod tests {
                 bold: true,
                 italic: false,
                 underline: true,
+                tracking_px: Some(6.5),
+                line_height: Some(1.6),
             };
             td.content.chars().count()
         ];
+        td.box_width = Some(250.0);
 
         let json = text_to_json(&td);
         let restored = json_to_text_data(&json).expect("text json restores");
@@ -3876,6 +3898,7 @@ mod tests {
         assert!(restored.flip_x);
         assert!(restored.flip_y);
         assert_eq!(restored.glyph_styles, td.glyph_styles);
+        assert_eq!(restored.box_width, Some(250.0));
     }
 
     #[test]

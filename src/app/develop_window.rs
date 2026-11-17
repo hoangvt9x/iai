@@ -445,6 +445,16 @@ impl App {
             .iter()
             .map(|entry| (entry.doc, entry.settings.clone()))
             .collect();
+        // Of several, the last in the filmstrip is shown at the end.
+        let show_at_end = (chosen.len() > 1)
+            .then(|| {
+                entries
+                    .iter()
+                    .rev()
+                    .find(|entry| chosen.iter().any(|c| c.doc == entry.doc))
+                    .map(|entry| entry.doc)
+            })
+            .flatten();
         self.discard_transient_develop_docs(&discarded);
         let total_images = pending.len();
         if pending.is_empty() {
@@ -464,6 +474,7 @@ impl App {
             rx: None,
             fresh,
             eight_bit,
+            show_at_end,
         });
         self.develop_bake_all_start_next();
     }

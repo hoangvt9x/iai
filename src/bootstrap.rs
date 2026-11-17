@@ -78,7 +78,7 @@ pub fn run() -> Result<(), BootstrapError> {
         .filter(|path| path.is_file())
         .collect();
     if !startup_files.is_empty() {
-        app.start_load_paths(startup_files);
+        app.open_files(startup_files);
     }
     let ended = event_loop
         .run_app(&mut app)

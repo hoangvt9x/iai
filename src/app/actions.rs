@@ -67,13 +67,20 @@ impl App {
                 self.edit.tools.eraser_mut().bg_color = color;
             }
             2 => {
-                // While editing, colour applies to the current selection (or
-                // pending caret) before updating the default so unselected
-                // characters keep their prior colour.
-                if self.edit.text_edit.is_some() {
-                    self.apply_text_style_to_selection(Some(color), None, None, None, None, None);
+                // While editing, colour applies to the current selection only
+                // (the text's own colour stays), else to the whole text.
+                let on_selection = self.edit.text_edit.is_some()
+                    && self.apply_text_style_to_selection(
+                        Some(color),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                if !on_selection {
+                    self.edit.text_color = color;
                 }
-                self.edit.text_color = color;
                 self.edit.fg_color = color;
             }
             3 => {
@@ -453,6 +460,39 @@ mod menu_runs_commands {
     fn red_at(app: &App, x: u32, y: u32) -> u8 {
         let canvas = &app.docs.active().canvas;
         canvas.flatten_for_export()[((y * canvas.width + x) * 4) as usize]
+    }
+
+    /// A size or colour chosen on the options bar with letters selected goes
+    /// to those letters only: the text's own size stays (setting it too made
+    /// every line as tall as the letters last enlarged, 17/11); with none
+    /// selected it is the whole text's.
+    #[test]
+    fn a_style_for_selected_letters_leaves_the_texts_own() {
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.edit.text_font_px = 40.0;
+        app.edit.text_font_px_auto = false;
+        app.edit.tools.select(crate::tools::ToolId::Text);
+        app.text_tool_click(5.0, 5.0);
+        app.update_text_buffer("abcd".to_string());
+        app.update_text_cursor_cache(Some(1..3), Some(3));
+        let mut actions = UiActions::default();
+        actions.tool.set_text_font_px = Some(90.0);
+        actions.tool.set_text_color = Some([200, 0, 0, 255]);
+        app.handle_text_actions(&mut actions);
+        assert_eq!(app.edit.text_font_px, 40.0);
+        assert_eq!(app.edit.text_color, [0, 0, 0, 255]);
+        let s = app.edit.text_edit.as_ref().expect("a session");
+        let sizes: Vec<f32> = s.glyph_styles.iter().map(|g| g.font_px).collect();
+        assert_eq!(sizes, vec![40.0, 90.0, 90.0, 40.0]);
+        // Nothing selected: the whole text.
+        app.update_text_cursor_cache(None, Some(4));
+        let mut actions = UiActions::default();
+        actions.tool.set_text_font_px = Some(30.0);
+        app.handle_text_actions(&mut actions);
+        assert_eq!(app.edit.text_font_px, 30.0);
+        let s = app.edit.text_edit.as_ref().expect("a session");
+        assert!(s.glyph_styles.iter().all(|g| g.font_px == 30.0));
     }
 
     #[test]

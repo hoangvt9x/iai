@@ -313,6 +313,13 @@ impl App {
                         } else {
                             self.edit.tools.brush().settings.size
                         };
+                    self.edit.input.alt_drag_start_hardness = match self.edit.tools.active_id() {
+                        crate::tools::ToolId::Eraser => self.edit.tools.eraser().hardness,
+                        crate::tools::ToolId::Dodge | crate::tools::ToolId::Burn => {
+                            self.edit.tools.dodge_burn().hardness
+                        }
+                        _ => self.edit.tools.brush().settings.hardness,
+                    };
                     if let Some(win) = &self.win.window {
                         win.set_cursor_visible(false);
                     }
@@ -442,7 +449,10 @@ impl App {
                     if let Some(idx) = self.text_layer_at(ev.canvas_x, ev.canvas_y) {
                         self.begin_edit_text_layer(idx);
                     } else {
-                        self.text_tool_click(ev.canvas_x, ev.canvas_y);
+                        // New type starts on release: a click is point type,
+                        // a drag a paragraph box (as Photoshop).
+                        let at = (ev.canvas_x, ev.canvas_y);
+                        self.edit.text_box_drag = Some((at, at));
                     }
                 }
                 self.edit.input.last_left_release_time = None;
@@ -707,6 +717,45 @@ impl App {
                 }
                 return;
             }
+            // A layer locked whole ("Lock all") is not painted, as in
+            // Photoshop; the Background's own lock is handled by the toolbar.
+            if self.edit.transform_state.is_none() && paints_layer && {
+                let layer = self.docs.active().canvas.active_layer();
+                layer.locked && !layer.is_background
+            } {
+                self.shell.status_msg = "Layer đang khóa — mở khóa (Lock) để vẽ".to_string();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+            // A brush on the letters of a type layer: nothing would be
+            // painted (its pixels are made from its words), and nothing said
+            // so. Photoshop asks to rasterize it first; this says so.
+            let brushes = matches!(
+                self.edit.tools.active_id(),
+                ToolId::Brush
+                    | ToolId::Eraser
+                    | ToolId::Pencil
+                    | ToolId::Clone
+                    | ToolId::Repair
+                    | ToolId::Smudge
+                    | ToolId::Dodge
+                    | ToolId::Burn
+                    | ToolId::Patch
+            );
+            if self.edit.transform_state.is_none() && brushes && {
+                let layer = self.docs.active().canvas.active_layer();
+                matches!(layer.layer_type, crate::core::layer::LayerType::Text(_))
+                    && matches!(layer.paint_target, crate::core::layer::PaintTarget::Pixels)
+            } {
+                self.shell.status_msg =
+                    "Layer chữ: vào menu Layer → Rasterize Layer rồi mới vẽ được".to_string();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                return;
+            }
 
             self.edit.input.painting = true;
             if self.edit.transform_state.is_some() {
@@ -779,6 +828,23 @@ impl App {
 
     fn on_main_left_release_with(&mut self, event_loop: Option<&ActiveEventLoop>) {
         self.edit.input.eyedropping = false;
+        // The Type tool let go: point type where a click was, a paragraph
+        // box where a drag was.
+        if let Some((from, to)) = self.edit.text_box_drag.take() {
+            let zoom = self.edit.view.zoom.max(0.01);
+            let dragged =
+                (to.0 - from.0).abs() * zoom >= 6.0 || (to.1 - from.1).abs() * zoom >= 6.0;
+            if dragged {
+                self.text_tool_box(from, to);
+            } else {
+                self.text_tool_click(from.0, from.1);
+            }
+            self.edit.input.last_left_release_time = None;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
         if self.edit.input.zoom_dragging {
             let clicked = !self.edit.input.zoom_drag_moved;
             self.edit.input.zoom_dragging = false;
@@ -989,6 +1055,7 @@ impl App {
                     );
                     self.edit.tools.on_release(event, &mut ctx)
                 };
+                self.note_paint_stroke(active_tool);
                 if let Some(msg) = tool_resp.status {
                     self.shell.status_msg = msg.to_string();
                 }
@@ -1278,6 +1345,19 @@ impl App {
             return;
         }
 
+        if self.edit.text_box_drag.is_some() {
+            let ev = self.tool_event();
+            if let Some((_, to)) = self.edit.text_box_drag.as_mut() {
+                *to = (ev.canvas_x, ev.canvas_y);
+            }
+            self.edit.input.last_mouse_x = position.x;
+            self.edit.input.last_mouse_y = position.y;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
         if self.edit.input.zoom_dragging && !self.is_blocking_modal() {
             let drag_x = self.edit.input.mouse_x - self.edit.input.zoom_drag_start_x;
             let drag_y = self.edit.input.mouse_y - self.edit.input.zoom_drag_start_y;
@@ -1360,6 +1440,34 @@ impl App {
                 self.edit.tools.eraser_mut().size = new_size;
             } else {
                 self.edit.tools.brush_mut().settings.size = new_size;
+            }
+            // Vertical: hardness (Brush / Eraser / Dodge / Burn), past a small dead zone so
+            // a sideways drag leaves it alone. Up softens, down hardens.
+            let delta_y = self.edit.input.mouse_y - self.edit.input.alt_drag_start_y;
+            const DEAD_ZONE: f32 = 6.0;
+            if delta_y.abs() > DEAD_ZONE
+                && !self.edit.show_refine_panel
+                && !self.portrait_painting()
+            {
+                let hardness = (self.edit.input.alt_drag_start_hardness
+                    + (delta_y - DEAD_ZONE.copysign(delta_y)) / 200.0)
+                    .clamp(0.0, 1.0);
+                match self.edit.tools.active_id() {
+                    crate::tools::ToolId::Eraser => {
+                        let eraser = self.edit.tools.eraser_mut();
+                        eraser.hardness = hardness;
+                        eraser.preset_idx = crate::tools::brush::PRESET_CUSTOM;
+                    }
+                    crate::tools::ToolId::Brush => {
+                        let brush = self.edit.tools.brush_mut();
+                        brush.settings.hardness = hardness;
+                        brush.preset_idx = crate::tools::brush::PRESET_CUSTOM;
+                    }
+                    crate::tools::ToolId::Dodge | crate::tools::ToolId::Burn => {
+                        self.edit.tools.dodge_burn_mut().hardness = hardness;
+                    }
+                    _ => {}
+                }
             }
             self.win.last_cursor_radius = 0;
             self.sync_cursor(event_loop);

@@ -17,6 +17,15 @@ pub struct EditorInteraction {
     pub(in crate::app) input: InputState,
     pub(in crate::app) selection_mode: crate::core::selection::SelectionMode,
     pub(in crate::app) pending_stroke_inputs: Vec<PointerEvent>,
+    /// The paint tool asked for another frame without new input (smoothing
+    /// catching up, airbrush); see `redraw.rs`.
+    pub(in crate::app) tool_wants_frames: bool,
+    /// The painting tools' options as last written to `prefs.json` (see
+    /// `persist_paint_prefs`), and since when they differ from that.
+    pub(in crate::app) paint_prefs_saved: Option<crate::tools::paint_prefs::PaintPrefs>,
+    pub(in crate::app) paint_prefs_changed_at: Option<std::time::Instant>,
+    /// What painting the stroke under way has cost, for the black box.
+    pub(in crate::app) paint_stroke_stats: Option<PaintStrokeStats>,
     /// In-progress guide drag (create from ruler, or move an existing guide).
     pub(in crate::app) guide_op: Option<GuideOp>,
     /// Guide picked with the Move tool (its document, its index there):
@@ -160,6 +169,16 @@ pub struct EditorInteraction {
     pub(in crate::app) text_line_height: f32,
     pub(in crate::app) text_tracking_px: f32,
     pub(in crate::app) text_opacity: f32,
+    /// With the Type tool and a type layer picked (not being edited): that
+    /// layer's id and a fingerprint of its style, once the defaults above
+    /// were taken from it — the options bar shows, and changes, that layer.
+    pub(in crate::app) text_style_layer: Option<(u32, u64)>,
+    /// A change made on the options bar to the picked type layer, written
+    /// into it once the mouse is let go (a size dragged writes once).
+    pub(in crate::app) text_restyle_pending: Option<u32>,
+    /// A paragraph box being dragged out with the Type tool: where the drag
+    /// began and where the pointer is, canvas pixels.
+    pub(in crate::app) text_box_drag: Option<((f32, f32), (f32, f32))>,
     /// One-shot: request egui to focus the text overlay on the next frame.
     pub(in crate::app) text_focus_pending: bool,
     /// egui family names (iai_text_*) currently installed in the egui context.
@@ -211,4 +230,15 @@ pub struct EditorInteraction {
     /// Patched with the area each render rewrote (see `update_refine_overlay_tex`).
     pub(in crate::app) refine_overlay_tex: Option<egui::TextureHandle>,
     pub(in crate::app) refine_overlay_mask_rev: u64,
+}
+
+/// Time a painting stroke spent on the UI thread, frame by frame: one line of
+/// the black box per stroke (`App::note_paint_stroke`), so a "the brush
+/// lags" report comes with numbers.
+#[derive(Clone, Debug)]
+pub(in crate::app) struct PaintStrokeStats {
+    pub started: std::time::Instant,
+    pub frames: u32,
+    pub busy: std::time::Duration,
+    pub worst: std::time::Duration,
 }

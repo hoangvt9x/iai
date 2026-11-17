@@ -69,6 +69,12 @@ pub struct InputState {
     pub alt_drag_start_x: f32,
     pub alt_drag_start_y: f32,
     pub alt_drag_start_size: f32,
+    /// Tip hardness when the Alt+right-drag began (Brush / Eraser: dragging
+    /// up softens, down hardens, as in Photoshop).
+    pub alt_drag_start_hardness: f32,
+    /// The first of two number keys typed quickly on a painting tool (the
+    /// digit, Shift held, when): `4` then `5` sets 45 %.
+    pub digit_entry: Option<(u8, bool, std::time::Instant)>,
     /// True while an Alt+left-drag is resizing the Warp brush (no warp this drag).
     pub warp_resizing: bool,
     pub zoom_dragging: bool,
@@ -738,6 +744,15 @@ pub struct TextEditState {
     /// user changes colour/size with no selection). `.0` is the caret index at
     /// which it is valid.
     pub pending_style: Option<(usize, crate::core::text::GlyphStyle)>,
+    /// The page point the type is anchored at, as Photoshop's point type:
+    /// on the first line's baseline, at its left, middle or right by the
+    /// alignment. It stays still while the words are typed, resized,
+    /// realigned or turned; `origin` follows it. `None` until learnt from
+    /// `origin` (a type layer opened again), and for text on a path.
+    pub anchor: Option<(f32, f32)>,
+    /// Paragraph type's box width (see `TextData::box_width`); `None`:
+    /// point type.
+    pub box_width: Option<f32>,
 }
 
 /// An in-progress drag of a Shape layer's on-canvas handle (resize / corner
@@ -1145,6 +1160,10 @@ pub struct DevelopBakeAll {
     pub fresh: Vec<DocumentId>,
     /// Open the fresh RAW images at 8 bits/channel (lighter in RAM).
     pub eight_bit: bool,
+    /// Several images opened: the last of them in the filmstrip's order (its
+    /// last tab), shown once all are open, as Photoshop shows the last of
+    /// several files opened.
+    pub show_at_end: Option<DocumentId>,
     pub rx: Option<std::sync::mpsc::Receiver<DevelopBakeAllResult>>,
 }
 
@@ -1281,6 +1300,10 @@ impl App {
                 tools: {
                     let mut tools = ToolManager::new();
                     tools.set_snap(settings_snap);
+                    // The painting tools' options as the last session left them.
+                    if let Some(prefs) = crate::tools::paint_prefs::PaintPrefs::load() {
+                        prefs.apply(&mut tools);
+                    }
                     tools
                 },
                 fg_color: [0, 0, 0, 255],
@@ -1311,6 +1334,8 @@ impl App {
                     alt_drag_start_x: 0.0,
                     alt_drag_start_y: 0.0,
                     alt_drag_start_size: 20.0,
+                    alt_drag_start_hardness: 1.0,
+                    digit_entry: None,
                     zoom_dragging: false,
                     zoom_drag_moved: false,
                     zoom_drag_start_x: 0.0,
@@ -1323,6 +1348,10 @@ impl App {
                 },
                 selection_mode: crate::core::selection::SelectionMode::Add,
                 pending_stroke_inputs: Vec::new(),
+                tool_wants_frames: false,
+                paint_prefs_saved: None,
+                paint_prefs_changed_at: None,
+                paint_stroke_stats: None,
                 guide_op: None,
                 selected_guide: None,
                 transform_snap_guides: Vec::new(),
@@ -1371,6 +1400,9 @@ impl App {
                 text_line_height: 1.2,
                 text_tracking_px: 0.0,
                 text_opacity: 1.0,
+                text_style_layer: None,
+                text_restyle_pending: None,
+                text_box_drag: None,
                 text_focus_pending: false,
                 text_fonts_registered: std::collections::HashSet::new(),
                 text_fonts_failed: std::collections::HashSet::new(),
@@ -1423,6 +1455,7 @@ impl App {
                 pending_pdf_page_render: None,
                 pending_pdf_page_delete: None,
                 dropped_pdf_page_files: Vec::new(),
+                dropped_open_files: Vec::new(),
                 pending_pdf_page_insert: None,
                 pending_reload_prompt: None,
                 pending_reload_job: None,
@@ -1438,6 +1471,7 @@ impl App {
                 print_queue: std::collections::VecDeque::new(),
                 print_gdi_failed: None,
                 print_failed_doc: None,
+                print_skipped: Vec::new(),
                 shape_bake: None,
                 path_bake: None,
                 path_bake_next: None,
@@ -2680,6 +2714,8 @@ impl App {
     /// Start an app exit from a user gesture (window close / File > Exit). Returns
     /// true only when the caller should exit immediately.
     pub fn request_app_exit(&mut self) -> bool {
+        // The painting tools' options are kept for the next session.
+        crate::tools::paint_prefs::PaintPrefs::of(&self.edit.tools).save();
         // What is being written decides which tabs still count as unsaved.
         self.finish_save_jobs();
         // A retouch previewed lands in its layer, to be saved with the rest.

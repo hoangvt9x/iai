@@ -212,21 +212,47 @@ impl App {
         // that cannot come (closed, or a PDF page still rendering) is not
         // printed in its place.
         if let Some(why) = &gdi_failed
-            && let Some((doc, page)) = self.jobs.print_failed_doc.take()
+            && let Some(failed) = self.jobs.print_failed_doc.take()
         {
-            if let Some(idx) = self.docs.index_of(doc)
-                && idx != self.docs.active_doc_idx
-            {
-                self.switch_to_doc(idx);
-            }
-            // And the page of that tab it was.
-            if self.docs.active().id == doc && self.docs.active().active_artboard != page {
-                let _ = self.run_with("page.select", serde_json::json!({ "page": page }));
-            }
-            if self.docs.active().id != doc || self.docs.active().active_artboard != page {
-                self.shell.status_msg =
-                    format!("Không in được tờ vừa gửi ({why}): mở lại tab đó rồi in lại");
+            if failed.pdf_page.is_some() && !failed.label.is_empty() {
+                // One of several pages of an opened PDF: the rest would go to
+                // the same printer, so the print stops there, and says so.
+                let dropped = self.jobs.print_queue.len();
+                self.jobs.print_queue.clear();
+                self.jobs.print_skipped.clear();
+                self.shell.status_msg = if dropped == 0 {
+                    format!("Máy in không nhận {} ({why})", failed.label)
+                } else {
+                    format!(
+                        "Máy in không nhận {} ({why}) — đã dừng, {dropped} tờ còn lại chưa in; kiểm tra máy in rồi in lại",
+                        failed.label
+                    )
+                };
                 gdi_failed = None;
+            } else {
+                if let Some(idx) = self.docs.index_of(failed.doc)
+                    && idx != self.docs.active_doc_idx
+                {
+                    self.switch_to_doc(idx);
+                }
+                // And the page of that tab it was.
+                if self.docs.active().id == failed.doc
+                    && self.docs.active().active_artboard != failed.page
+                {
+                    let _ =
+                        self.run_with("page.select", serde_json::json!({ "page": failed.page }));
+                }
+                let doc = self.docs.active();
+                let pdf_page_shown = failed.pdf_page.is_none_or(|page| {
+                    doc.pdf_document
+                        .as_ref()
+                        .is_some_and(|pdf| pdf.active_page == page)
+                });
+                if doc.id != failed.doc || doc.active_artboard != failed.page || !pdf_page_shown {
+                    self.shell.status_msg =
+                        format!("Không in được tờ vừa gửi ({why}): mở lại tab đó rồi in lại");
+                    gdi_failed = None;
+                }
             }
         }
         if actions.print.print_stop {

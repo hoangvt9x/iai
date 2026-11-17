@@ -12,6 +12,22 @@ impl App {
         {
             self.commit_text_edit();
         }
+        // With the Type tool and a type layer picked (not being edited), the
+        // options bar shows that layer's style, and a change made there is
+        // written into it (as Photoshop does), once the mouse is let go.
+        let picked_type = self.adopt_picked_type_style();
+        let restyles = actions.tool.set_text_font_px.is_some()
+            || actions.tool.set_text_font_family.is_some()
+            || actions.tool.set_text_color.is_some()
+            || actions.tool.set_text_bold.is_some()
+            || actions.tool.set_text_italic.is_some()
+            || actions.tool.set_text_underline.is_some()
+            || actions.tool.set_text_line_height.is_some()
+            || actions.tool.set_text_tracking_px.is_some()
+            || actions.tool.set_text_align.is_some();
+        if restyles && let Some(id) = picked_type {
+            self.edit.text_restyle_pending = Some(id);
+        }
 
         if let Some(buf) = actions.tool.text_buffer.take() {
             self.update_text_buffer(buf);
@@ -24,12 +40,13 @@ impl App {
                 crate::core::text::MIN_EDITABLE_FONT_PX,
                 crate::core::text::MAX_EDITABLE_FONT_PX,
             );
-            // Apply to the selection (or pending caret) before changing the
-            // default, so unselected characters keep their prior size.
-            if self.edit.text_edit.is_some() {
-                self.apply_text_style_to_selection(None, Some(px), None, None, None, None);
+            // The selected letters only (the text's own size stays, as the
+            // lines' measures follow it), else the whole text.
+            let on_selection = self.edit.text_edit.is_some()
+                && self.apply_text_style_to_selection(None, Some(px), None, None, None, None);
+            if !on_selection {
+                self.edit.text_font_px = px;
             }
-            self.edit.text_font_px = px;
             // An explicit choice wins over canvas-sized auto defaults.
             self.edit.text_font_px_auto = false;
             if let Some(w) = &self.win.window {
@@ -46,58 +63,82 @@ impl App {
             self.cancel_text_font_family_preview();
         }
         if let Some(color) = actions.tool.set_text_color.take() {
-            if self.edit.text_edit.is_some() {
-                self.apply_text_style_to_selection(Some(color), None, None, None, None, None);
+            let on_selection = self.edit.text_edit.is_some()
+                && self.apply_text_style_to_selection(Some(color), None, None, None, None, None);
+            if !on_selection {
+                self.edit.text_color = color;
             }
-            self.edit.text_color = color;
             self.edit.fg_color = color;
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
         }
         if let Some(v) = actions.tool.set_text_bold.take() {
-            if self.edit.text_edit.is_some() {
-                self.apply_text_style_to_selection(None, None, None, Some(v), None, None);
+            let on_selection = self.edit.text_edit.is_some()
+                && self.apply_text_style_to_selection(None, None, None, Some(v), None, None);
+            if !on_selection {
+                self.edit.text_bold = v;
             }
-            self.edit.text_bold = v;
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
         }
         if let Some(v) = actions.tool.set_text_italic.take() {
-            if self.edit.text_edit.is_some() {
-                self.apply_text_style_to_selection(None, None, None, None, Some(v), None);
+            let on_selection = self.edit.text_edit.is_some()
+                && self.apply_text_style_to_selection(None, None, None, None, Some(v), None);
+            if !on_selection {
+                self.edit.text_italic = v;
             }
-            self.edit.text_italic = v;
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
         }
         if let Some(v) = actions.tool.set_text_underline.take() {
-            if self.edit.text_edit.is_some() {
-                self.apply_text_style_to_selection(None, None, None, None, None, Some(v));
+            let on_selection = self.edit.text_edit.is_some()
+                && self.apply_text_style_to_selection(None, None, None, None, None, Some(v));
+            if !on_selection {
+                self.edit.text_underline = v;
             }
-            self.edit.text_underline = v;
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
         }
+        // Line height and tracking: of the selected letters while some are
+        // selected (as Photoshop), else of the whole text.
         if let Some(v) = actions.tool.set_text_line_height.take() {
-            self.edit.text_line_height = v.clamp(0.5, 4.0);
+            let v = v.clamp(0.5, 4.0);
+            if !self.apply_text_spacing_to_selection(None, Some(v)) {
+                self.edit.text_line_height = v;
+            }
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
         }
         if let Some(v) = actions.tool.set_text_tracking_px.take() {
-            self.edit.text_tracking_px = v.clamp(-200.0, 500.0);
+            let v = v.clamp(-200.0, 500.0);
+            if !self.apply_text_spacing_to_selection(Some(v), None) {
+                self.edit.text_tracking_px = v;
+            }
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
         }
-        if let Some(origin) = actions.tool.text_move_origin.take()
+        if let Some(ask) = actions.tool.text_frame.take()
             && let Some(session) = &mut self.edit.text_edit
         {
-            session.origin = origin;
+            match ask {
+                crate::ui::TextFrameAsk::Move(origin) => {
+                    session.origin = origin;
+                    // Moved by hand: the anchor goes with it (learnt again
+                    // below).
+                    session.anchor = None;
+                }
+                crate::ui::TextFrameAsk::BoxWidth(w) => {
+                    if w.is_finite() {
+                        session.box_width = Some(w.clamp(1.0, 100_000.0));
+                    }
+                }
+            }
             self.edit.text_focus_pending = false;
             if let Some(w) = &self.win.window {
                 w.request_redraw();
@@ -132,6 +173,10 @@ impl App {
         }
         self.edit.text_drag_hovered = actions.tool.text_drag_handle_hovered;
         self.edit.text_panel_hovered = actions.tool.text_panel_hovered;
+        // The type being edited keeps its anchor still through whatever
+        // changed above (words, size, alignment, font…).
+        self.sync_text_anchor();
+        self.finish_picked_type_restyle();
     }
 
     pub(super) fn handle_transform_crop_actions(
@@ -288,7 +333,8 @@ impl App {
         let path_style = self.active_path_style_vm();
         match target {
             1 => self.edit.bg_color,
-            2 => self.edit.text_color,
+            // The selected letters' colour while some are selected.
+            2 => self.text_bar_style().color,
             3 => self.edit.tools.shape().fill_color,
             4 => self.edit.tools.shape().stroke_color,
             5 => path_style.map_or([0, 0, 0, 255], |s| s.fill_color),
@@ -339,61 +385,12 @@ impl App {
             }
             self.sync_cursor(event_loop);
         }
-        if let Some(s) = actions.tool.brush_size.take() {
-            if self.edit.tools.active_id() == crate::tools::ToolId::Eraser {
-                self.edit.tools.eraser_mut().size = s.clamp(1.0, 5000.0);
-            } else {
-                self.edit.tools.brush_mut().settings.size = s.clamp(1.0, 5000.0);
+        for param in std::mem::take(&mut actions.tool.brush) {
+            if matches!(param, crate::ui::BrushParam::Size(_)) {
+                self.win.last_cursor_radius = 0;
             }
-            self.win.last_cursor_radius = 0;
+            self.edit.tools.set_paint_param(param);
             self.sync_cursor(event_loop);
-        }
-        if let Some(h) = actions.tool.brush_hardness.take() {
-            let h = h.clamp(0.0, 1.0);
-            if self.edit.tools.active_id() == crate::tools::ToolId::Eraser {
-                self.edit.tools.eraser_mut().hardness = h;
-            } else {
-                let b = self.edit.tools.brush_mut();
-                b.settings.hardness = h;
-                b.preset_idx = crate::tools::brush::PRESET_CUSTOM;
-            }
-        }
-        if let Some(o) = actions.tool.brush_opacity.take() {
-            let o = o.clamp(0.0, 1.0);
-            if self.edit.tools.active_id() == crate::tools::ToolId::Eraser {
-                self.edit.tools.eraser_mut().opacity = o;
-            } else {
-                self.edit.tools.brush_mut().settings.opacity = o;
-            }
-        }
-        if let Some(s) = actions.tool.brush_spacing.take() {
-            if self.edit.tools.active_id() == crate::tools::ToolId::Eraser {
-                let e = self.edit.tools.eraser_mut();
-                e.spacing = s;
-                e.preset_idx = crate::tools::brush::PRESET_CUSTOM;
-            } else {
-                let b = self.edit.tools.brush_mut();
-                b.settings.spacing = s;
-                b.preset_idx = crate::tools::brush::PRESET_CUSTOM;
-            }
-        }
-        if let Some(s) = actions.tool.brush_smoothing.take() {
-            if self.edit.tools.active_id() == crate::tools::ToolId::Eraser {
-                self.edit.tools.eraser_mut().smoothing = s.clamp(0.0, 1.0);
-            } else {
-                self.edit.tools.brush_mut().settings.smoothing = s.clamp(0.0, 1.0);
-            }
-        }
-        if let Some(f) = actions.tool.brush_flow.take() {
-            if self.edit.tools.active_id() == crate::tools::ToolId::Eraser {
-                let e = self.edit.tools.eraser_mut();
-                e.flow = f.clamp(0.0, 1.0);
-                e.preset_idx = crate::tools::brush::PRESET_CUSTOM;
-            } else {
-                let b = self.edit.tools.brush_mut();
-                b.settings.flow = f.clamp(0.0, 1.0);
-                b.preset_idx = crate::tools::brush::PRESET_CUSTOM;
-            }
         }
         if let Some(idx) = actions.tool.select_brush_preset.take() {
             if self.edit.tools.active_id() == crate::tools::ToolId::Eraser {

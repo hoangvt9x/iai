@@ -110,6 +110,9 @@ pub struct BackgroundJobs {
     /// Image/PDF files dropped from the OS onto a PDF document, staged for one
     /// batched page insert on the next frame (winit sends one event per file).
     pub(in crate::app) dropped_pdf_page_files: Vec<PathBuf>,
+    /// Files dropped from the OS to open, staged so one drop of several
+    /// files opens as one (in name order, the last shown) on the next frame.
+    pub(in crate::app) dropped_open_files: Vec<PathBuf>,
     /// Decode of image/PDF files selected for insertion into an existing PDF.
     #[allow(clippy::type_complexity)]
     pub(in crate::app) pending_pdf_page_insert: Option<
@@ -174,7 +177,10 @@ pub struct BackgroundJobs {
     /// through the PDF handler instead.
     pub(in crate::app) print_gdi_failed: Option<String>,
     /// The document and page that direct print was of, for that PDF route.
-    pub(in crate::app) print_failed_doc: Option<(crate::core::document::DocumentId, usize)>,
+    pub(in crate::app) print_failed_doc: Option<PrintedPage>,
+    /// Pages of the print going out that could not be rendered ("trang 4"),
+    /// said once the last sheet has gone.
+    pub(in crate::app) print_skipped: Vec<String>,
     /// Off-thread Shape rasterization in flight. See [`ShapeBakeInFlight`].
     pub(in crate::app) shape_bake: Option<ShapeBakeInFlight>,
     /// Off-thread Path (vector) rasterization in flight — used by the live
@@ -202,19 +208,136 @@ pub struct BackgroundJobs {
     pub(in crate::app) ext: crate::app::ext_bridge::ExtBridge,
 }
 
+/// Which page of which tab a sheet is, for the PDF route when the device
+/// refuses it and for what the status line says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::app) struct PrintedPage {
+    pub(in crate::app) doc: crate::core::document::DocumentId,
+    /// Its artboard, 0 being the first (always 0 in an opened PDF).
+    pub(in crate::app) page: usize,
+    /// The page of an opened PDF it is (its source page), when it is one.
+    pub(in crate::app) pdf_page: Option<usize>,
+    /// "trang 3/10" when it is one of several sheets sent together; empty
+    /// for a sheet alone.
+    pub(in crate::app) label: String,
+}
+
+impl PrintedPage {
+    /// An artboard of `doc`, printed alone.
+    #[cfg(test)]
+    pub(in crate::app) fn alone(doc: crate::core::document::DocumentId, page: usize) -> Self {
+        Self {
+            doc,
+            page,
+            pdf_page: None,
+            label: String::new(),
+        }
+    }
+}
+
+/// What a print worker composites: layers it already has, or a page of an
+/// opened PDF it first renders.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Clone)]
+pub(in crate::app) enum PrintSheet {
+    /// The page's layers (shared, not copied), its size and resolution.
+    Layers {
+        stack: crate::core::layer::LayerStack,
+        width: u32,
+        height: u32,
+        dpi: f32,
+    },
+    /// A page of an opened PDF that has never been shown, so nothing of it is
+    /// in memory: the worker renders it, then prints it. A run of such pages
+    /// keeps one page at a time in memory, however long the PDF.
+    PdfPage {
+        source: std::sync::Arc<PdfPrintSource>,
+        /// Its source page, 0 being the first.
+        index: usize,
+    },
+}
+
+/// The opened PDF the pages of one print come from. Opened (read and parsed)
+/// once, by the worker of the first page that needs it, and shared by the
+/// rest of that print.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(in crate::app) struct PdfPrintSource {
+    path: std::path::PathBuf,
+    /// The resolution the tab shows its pages at.
+    dpi: f32,
+    /// What "every page" edits lay over each page, as the tab shows them.
+    global_edits: Vec<crate::core::document::PdfGlobalEdit>,
+    opened: std::sync::Mutex<Option<crate::formats::pdf::PdfPages>>,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl PdfPrintSource {
+    pub(in crate::app) fn new(
+        path: std::path::PathBuf,
+        dpi: f32,
+        global_edits: Vec<crate::core::document::PdfGlobalEdit>,
+    ) -> Self {
+        Self {
+            path,
+            dpi,
+            global_edits,
+            opened: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Source page `index` as the tab would show it: rendered at the tab's
+    /// resolution, with the edits made to every page over it. Returns its
+    /// layers, size and resolution.
+    pub(in crate::app) fn render(
+        &self,
+        index: usize,
+    ) -> Result<(crate::core::layer::LayerStack, u32, u32, f32), String> {
+        let mut opened = self
+            .opened
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if opened.is_none() {
+            if !self.path.exists() {
+                return Err(format!(
+                    "không thấy file PDF «{}» (đã đổi tên hay chuyển đi?)",
+                    self.path
+                        .file_name()
+                        .map(|n| n.to_string_lossy())
+                        .unwrap_or_default()
+                ));
+            }
+            *opened = Some(crate::formats::pdf::PdfPages::open(&self.path)?);
+        }
+        let pdf = opened
+            .as_ref()
+            .ok_or_else(|| "the PDF could not be opened".to_string())?;
+        let plan = pdf.plan(&[index], Some(self.dpi))?;
+        let (_, canvas) = pdf
+            .renders(&plan)
+            .next()
+            .ok_or_else(|| format!("PDF page {} did not render", index + 1))??;
+        let (width, height, dpi) = (canvas.width, canvas.height, canvas.metadata.resolution_ppi);
+        let mut stack = canvas.layer_stack;
+        if let Some(overlay) = crate::core::document::build_pdf_global_overlay_stack(
+            &self.global_edits,
+            index,
+            width,
+            height,
+        ) {
+            stack = stack.with_overlay(&overlay);
+        }
+        Ok((stack, width, height, dpi))
+    }
+}
+
 /// Everything a print worker needs of a sheet, taken when Print is pressed:
-/// the page's layers (shared, not copied), its size and resolution, and the
-/// print settings then. The page is composited on the worker.
+/// the page (its layers, or the PDF page to render), and the print settings
+/// then. The page is composited on the worker.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(in crate::app) struct PrintTask {
-    pub(in crate::app) doc_id: crate::core::document::DocumentId,
-    /// Which page of it, 0 being the first.
-    pub(in crate::app) page: usize,
+    pub(in crate::app) of: PrintedPage,
     pub(in crate::app) doc_name: String,
-    pub(in crate::app) stack: crate::core::layer::LayerStack,
-    pub(in crate::app) width: u32,
-    pub(in crate::app) height: u32,
-    pub(in crate::app) dpi: f32,
+    pub(in crate::app) sheet: PrintSheet,
     pub(in crate::app) layout: crate::core::print::PrintLayout,
     /// The printer's RGB profile, when the app manages colour.
     pub(in crate::app) profile: Option<Vec<u8>>,
@@ -228,7 +351,7 @@ pub(in crate::app) struct PrintJob {
     pub(in crate::app) printer: String,
     /// The document and page printed, for the PDF route if the device
     /// refuses.
-    pub(in crate::app) page_of: (crate::core::document::DocumentId, usize),
+    pub(in crate::app) page_of: PrintedPage,
     /// `Ok`, or why the device refused.
     pub(in crate::app) rx: std::sync::mpsc::Receiver<Result<(), String>>,
     /// Where the worker is, and how it hears the job is no longer wanted.
@@ -258,7 +381,7 @@ impl PrintJob {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(in crate::app) fn new(
         printer: String,
-        page_of: (crate::core::document::DocumentId, usize),
+        page_of: PrintedPage,
         rx: std::sync::mpsc::Receiver<Result<(), String>>,
         progress: std::sync::Arc<crate::core::print_gdi::PrintProgress>,
         printer_state: std::sync::Arc<std::sync::OnceLock<crate::core::print_gdi::PrinterState>>,
@@ -294,8 +417,11 @@ impl PrintJob {
         self.moved_at.elapsed()
     }
 
+    /// A worker rendering a PDF page is at its own work, not waiting on the
+    /// printer, however long the page takes.
     pub(in crate::app) fn is_stuck(&self) -> bool {
-        self.still_for() >= Self::STUCK_AFTER
+        self.progress.stage() != crate::core::print_gdi::PrintStage::RenderingPage
+            && self.still_for() >= Self::STUCK_AFTER
     }
 
     /// What the spooler said of the printer, in brackets, when it said anything.
@@ -322,6 +448,8 @@ impl PrintJob {
                 self.still_for().as_secs(),
                 self.printer_says()
             )
+        } else if self.progress.stage() == crate::core::print_gdi::PrintStage::RenderingPage {
+            format!("Đang dựng trang PDF để in… {} giây", waited.as_secs())
         } else {
             format!("Đang gửi tới «{}»… {} giây", self.printer, waited.as_secs())
         })

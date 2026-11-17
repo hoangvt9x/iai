@@ -1,0 +1,45 @@
+{
+  "about": "Brush parity cases, painted the same way by Photoshop (ps/*.png, made by tools/brush_parity/ps_paint.jsx) and by iAi (src/tools/brush_parity.rs). Black (or `color`) on a transparent layer; sizes in px, hardness / spacing / opacity / flow in percent; each stroke is one press-drag-release along its points.",
+  "cases": [
+    { "id": "dab_9_h0", "w": 32, "h": 32, "size": 9, "hardness": 0, "strokes": [[[16, 16]]] },
+    { "id": "dab_9_h50", "w": 32, "h": 32, "size": 9, "hardness": 50, "strokes": [[[16, 16]]] },
+    { "id": "dab_9_h100", "w": 32, "h": 32, "size": 9, "hardness": 100, "strokes": [[[16, 16]]] },
+    { "id": "dab_50_h0", "w": 80, "h": 80, "size": 50, "hardness": 0, "strokes": [[[40, 40]]] },
+    { "id": "dab_50_h25", "w": 80, "h": 80, "size": 50, "hardness": 25, "strokes": [[[40, 40]]] },
+    { "id": "dab_50_h50", "w": 80, "h": 80, "size": 50, "hardness": 50, "strokes": [[[40, 40]]] },
+    { "id": "dab_50_h75", "w": 80, "h": 80, "size": 50, "hardness": 75, "strokes": [[[40, 40]]] },
+    { "id": "dab_50_h90", "w": 80, "h": 80, "size": 50, "hardness": 90, "strokes": [[[40, 40]]] },
+    { "id": "dab_50_h100", "w": 80, "h": 80, "size": 50, "hardness": 100, "strokes": [[[40, 40]]] },
+    { "id": "dab_300_h0", "w": 340, "h": 340, "size": 300, "hardness": 0, "strokes": [[[170, 170]]] },
+    { "id": "dab_300_h50", "w": 340, "h": 340, "size": 300, "hardness": 50, "strokes": [[[170, 170]]] },
+    { "id": "dab_300_h100", "w": 340, "h": 340, "size": 300, "hardness": 100, "strokes": [[[170, 170]]] },
+    { "id": "dab_1500_h0", "w": 1540, "h": 1540, "size": 1500, "hardness": 0, "strokes": [[[770, 770]]] },
+    { "id": "dab_1500_h100", "w": 1540, "h": 1540, "size": 1500, "hardness": 100, "strokes": [[[770, 770]]] },
+    { "id": "dab_50_h0_sub", "w": 80, "h": 80, "size": 50, "hardness": 0, "strokes": [[[40.5, 40.5]]] },
+
+    { "id": "line_50_h0_sp1", "w": 400, "h": 100, "size": 50, "hardness": 0, "spacing": 1, "strokes": [[[40, 50], [360, 50]]] },
+    { "id": "line_50_h0_sp25", "w": 400, "h": 100, "size": 50, "hardness": 0, "spacing": 25, "strokes": [[[40, 50], [360, 50]]] },
+    { "id": "line_50_h0_sp100", "w": 400, "h": 100, "size": 50, "hardness": 0, "spacing": 100, "strokes": [[[40, 50], [360, 50]]] },
+    { "id": "line_50_h100_sp1", "w": 400, "h": 100, "size": 50, "hardness": 100, "spacing": 1, "strokes": [[[40, 50], [360, 50]]] },
+    { "id": "line_50_h100_sp25", "w": 400, "h": 100, "size": 50, "hardness": 100, "spacing": 25, "strokes": [[[40, 50], [360, 50]]] },
+    { "id": "line_50_h100_sp100", "w": 400, "h": 100, "size": 50, "hardness": 100, "spacing": 100, "strokes": [[[40, 50], [360, 50]]] },
+
+    { "id": "line_50_h0_op100_fl30", "w": 400, "h": 100, "size": 50, "hardness": 0, "flow": 30, "strokes": [[[40, 50], [360, 50]]] },
+    { "id": "line_50_h0_op50_fl100", "w": 400, "h": 100, "size": 50, "hardness": 0, "opacity": 50, "strokes": [[[40, 50], [360, 50]]] },
+    { "id": "line_50_h0_op50_fl30", "w": 400, "h": 100, "size": 50, "hardness": 0, "opacity": 50, "flow": 30, "strokes": [[[40, 50], [360, 50]]] },
+    { "id": "zigzag_40_h50_op50", "w": 400, "h": 200, "size": 40, "hardness": 50, "opacity": 50, "strokes": [[[40, 40], [360, 160], [40, 160], [360, 40]]] },
+    { "id": "cross_40_h100_op50", "w": 200, "h": 200, "size": 40, "hardness": 100, "opacity": 50, "strokes": [[[20, 100], [180, 100]], [[100, 20], [100, 180]]] },
+    { "id": "stack20_300_h0_op5", "w": 340, "h": 340, "size": 300, "hardness": 0, "opacity": 5, "strokes": [[[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]]] },
+    { "id": "stack20_300_h0_op5_16bit", "bits": 16, "w": 340, "h": 340, "size": 300, "hardness": 0, "opacity": 5, "strokes": [[[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]], [[170, 170]]] },
+
+    { "id": "thin_1_h100", "w": 200, "h": 80, "size": 1, "hardness": 100, "strokes": [[[10.3, 10.7], [190.6, 70.2]]] },
+    { "id": "thin_2_h100", "w": 200, "h": 80, "size": 2, "hardness": 100, "strokes": [[[10.3, 10.7], [190.6, 70.2]]] },
+    { "id": "thin_3_h100", "w": 200, "h": 80, "size": 3, "hardness": 100, "strokes": [[[10.3, 10.7], [190.6, 70.2]]] },
+    { "id": "thin_3_h0", "w": 200, "h": 80, "size": 3, "hardness": 0, "strokes": [[[10.3, 10.7], [190.6, 70.2]]] },
+    { "id": "thin_6_h0", "w": 200, "h": 80, "size": 6, "hardness": 0, "strokes": [[[10.3, 10.7], [190.6, 70.2]]] },
+
+    { "id": "pencil_1", "tool": "pencil", "w": 200, "h": 80, "size": 1, "strokes": [[[10.3, 10.7], [190.6, 70.2]]] },
+    { "id": "pencil_5", "tool": "pencil", "w": 200, "h": 80, "size": 5, "strokes": [[[10.3, 10.7], [190.6, 70.2]]] },
+    { "id": "pencil_5_op50", "tool": "pencil", "w": 200, "h": 80, "size": 5, "opacity": 50, "strokes": [[[10.3, 10.7], [190.6, 70.2], [10.3, 70.2]]] }
+  ]
+}

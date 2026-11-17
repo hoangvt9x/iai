@@ -5,14 +5,17 @@ pub struct PencilTool {
     pub size: f32,
     pub opacity: f32,
     pub color: [u8; 4],
+    /// The Brush's Mode (see `ToolManager::pencil_follows_brush`).
+    pub mode: super::brush::BrushMode,
     cached_settings: BrushSettings,
-    /// Distance left until the next dab, carried across drag events (the
-    /// path without a stroke buffer).
-    stroke_residual: f32,
     /// Per-stroke coverage buffer, as Brush and Eraser use: overlapping
     /// dabs of one stroke no longer build up past Opacity (14/11: the
     /// Pencil all but ignored it).
     stroke: Option<super::brush::StrokeBuffer>,
+    /// Shift+click lines and Shift-drag axis.
+    lines: super::brush::ShiftLines,
+    /// Where the last drag left the (axis-held) stroke.
+    last: (f32, f32),
 }
 
 impl Default for PencilTool {
@@ -27,6 +30,7 @@ impl PencilTool {
             size: 5.0,
             opacity: 1.0,
             color: [0, 0, 0, 255],
+            mode: super::brush::BrushMode::Normal,
             cached_settings: BrushSettings {
                 size: 5.0,
                 hardness: 1.0,
@@ -36,9 +40,12 @@ impl PencilTool {
                 is_eraser: false,
                 smoothing: 0.0,
                 flow: 1.0,
+                aliased: true,
+                ..BrushSettings::default()
             },
-            stroke_residual: 0.0,
             stroke: None,
+            lines: super::brush::ShiftLines::default(),
+            last: (0.0, 0.0),
         }
     }
 
@@ -47,7 +54,42 @@ impl PencilTool {
         self.cached_settings.hardness = 1.0;
         self.cached_settings.opacity = self.opacity;
         self.cached_settings.color = self.color;
-        self.cached_settings.spacing = 0.1;
+        self.cached_settings.spacing = 0.25;
+        self.cached_settings.aliased = true;
+        self.cached_settings.mode = self.mode;
+    }
+
+    /// Dab centres for the stretch from `(x0, y0)` to `(x1, y1)`, the way
+    /// Photoshop's Pencil lays them: one per pixel along the stretch's longer
+    /// axis, on that axis's pixel centres, after the pixel the stretch starts
+    /// in up to the one it ends in. A 1 px line is then one pixel per column
+    /// (or row), joined at the corners, and stretches that follow on from
+    /// each other never stamp a pixel twice.
+    fn pixel_steps(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<(f32, f32)> {
+        if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
+            return Vec::new();
+        }
+        let (dx, dy) = (x1 - x0, y1 - y0);
+        let x_major = dx.abs() >= dy.abs();
+        let (a0, a1, b0, da, db) = if x_major {
+            (x0, x1, y0, dx, dy)
+        } else {
+            (y0, y1, x0, dy, dx)
+        };
+        let (c0, c1) = (a0.floor() as i64, a1.floor() as i64);
+        if c0 == c1 || da.abs() < 1e-6 {
+            return Vec::new();
+        }
+        let step = if c1 > c0 { 1 } else { -1 };
+        // A huge jump is cut to a few thousand dabs, like the brush walker.
+        let n = (c1 - c0).abs().min(16384);
+        (1..=n)
+            .map(|k| {
+                let a = (c0 + k * step) as f32 + 0.5;
+                let b = b0 + db * (a - a0) / da;
+                if x_major { (a, b) } else { (b, a) }
+            })
+            .collect()
     }
 }
 
@@ -75,6 +117,10 @@ impl Tool for PencilTool {
         ctx.canvas_mut().begin_stroke("Pencil Stroke");
         self.sync_cache();
         let (cx, cy) = (event.canvas_x, event.canvas_y);
+        // Shift+click: the stroke starts as a line from the last one's end.
+        let line_from = self.lines.press(ctx.document.id, cx, cy, event.shift);
+        let (sx, sy) = line_from.unwrap_or((cx, cy));
+        self.last = (cx, cy);
         let alpha_plane = matches!(
             ctx.canvas().channels.view,
             crate::core::channels::ChannelView::Alpha(_)
@@ -88,14 +134,15 @@ impl Tool for PencilTool {
             BrushTool::paint_cpu_dab_stroked(
                 &self.cached_settings,
                 ctx.canvas_mut(),
-                cx,
-                cy,
+                sx,
+                sy,
                 stroke,
             );
-            stroke.residual = self.cached_settings.dab_spacing();
-        } else {
-            BrushTool::paint_cpu_dab(&self.cached_settings, ctx.canvas_mut(), cx, cy);
-            self.stroke_residual = self.cached_settings.dab_spacing();
+        } else if alpha_plane {
+            BrushTool::paint_cpu_dab(&self.cached_settings, ctx.canvas_mut(), sx, sy);
+        }
+        if line_from.is_some() {
+            self.pixel_segment(ctx, sx, sy, cx, cy);
         }
         ToolResponse::repaint()
     }
@@ -103,39 +150,45 @@ impl Tool for PencilTool {
     fn on_drag(
         &mut self,
         event: PointerEvent,
-        prev: &PointerEvent,
+        _prev: &PointerEvent,
         ctx: &mut ToolCtx,
     ) -> ToolResponse {
         self.sync_cache();
-        let (x0, y0) = (prev.canvas_x, prev.canvas_y);
-        let (x1, y1) = (event.canvas_x, event.canvas_y);
-        if let Some(stroke) = self.stroke.as_mut() {
-            BrushTool::paint_cpu_stroke_segment_stroked(
-                &self.cached_settings,
-                ctx.canvas_mut(),
-                x0,
-                y0,
-                x1,
-                y1,
-                stroke,
-            );
-        } else {
-            BrushTool::paint_cpu_stroke_segment(
-                &self.cached_settings,
-                ctx.canvas_mut(),
-                x0,
-                y0,
-                x1,
-                y1,
-                &mut self.stroke_residual,
-            );
-        }
+        let (x0, y0) = self.last;
+        let (x1, y1) = self.lines.constrain(event.canvas_x, event.canvas_y);
+        self.last = (x1, y1);
+        self.pixel_segment(ctx, x0, y0, x1, y1);
         ToolResponse::repaint()
     }
 
-    fn on_release(&mut self, _event: PointerEvent, _ctx: &mut ToolCtx) -> ToolResponse {
+    fn on_release(&mut self, _event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
+        let (x, y) = self.last;
+        self.lines.release(ctx.document.id, x, y);
         self.stroke = None;
         ToolResponse::none()
+    }
+}
+
+impl PencilTool {
+    /// Pencil dabs from `(x0, y0)` to `(x1, y1)`, pixel by pixel.
+    fn pixel_segment(&mut self, ctx: &mut ToolCtx, x0: f32, y0: f32, x1: f32, y1: f32) {
+        let alpha_plane = matches!(
+            ctx.canvas().channels.view,
+            crate::core::channels::ChannelView::Alpha(_)
+        );
+        for (x, y) in Self::pixel_steps(x0, y0, x1, y1) {
+            if let Some(stroke) = self.stroke.as_mut() {
+                BrushTool::paint_cpu_dab_stroked(
+                    &self.cached_settings,
+                    ctx.canvas_mut(),
+                    x,
+                    y,
+                    stroke,
+                );
+            } else if alpha_plane {
+                BrushTool::paint_cpu_dab(&self.cached_settings, ctx.canvas_mut(), x, y);
+            }
+        }
     }
 }
 

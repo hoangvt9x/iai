@@ -778,19 +778,22 @@ impl ApplicationHandler for App {
             return;
         }
 
-        // Numpad Enter commits the text overlay. egui-winit maps both the main
-        // and numpad Enter to the same `Key::Enter`, so it must be caught here
-        // (before egui sees it) to keep the main Enter as a newline.
+        // Numpad Enter, or Ctrl+Enter (as in Photoshop), commits the text
+        // overlay. egui-winit maps both the main and numpad Enter to the same
+        // `Key::Enter`, so it must be caught here (before egui sees it) to
+        // keep the main Enter alone as a newline.
         if self.edit.text_edit.is_some()
             && let WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
-                        physical_key: PhysicalKey::Code(KeyCode::NumpadEnter),
+                        physical_key:
+                            PhysicalKey::Code(key @ (KeyCode::NumpadEnter | KeyCode::Enter)),
                         state: ElementState::Pressed,
                         ..
                     },
                 ..
             } = &event
+            && (*key == KeyCode::NumpadEnter || self.edit.input.ctrl_held)
             && !(self.shell.ui.show_paint_color_dialog
                 && self.shell.ui.paint_color_dialog_target == 2)
         {
@@ -1101,6 +1104,7 @@ impl ApplicationHandler for App {
                     self.edit.input.alt_right_dragging = false;
                     self.edit.input.zoom_dragging = false;
                     self.edit.input.zoom_drag_moved = false;
+                    self.edit.text_box_drag = None;
                     self.edit.input.space_held = false;
                     self.edit.input.alt_held = false;
                     self.edit.input.ctrl_held = false;
@@ -1190,8 +1194,13 @@ impl ApplicationHandler for App {
                     return;
                 }
                 // Otherwise decode off the UI thread (a large dropped image used to
-                // freeze the window) and open it as a new tab via the async loader.
-                self.start_load_paths(vec![path]);
+                // freeze the window) and open it as a new tab via the async loader,
+                // with the other files of the same drop (next frame): in name
+                // order, the last shown, one RAW decoded at a time.
+                self.jobs.dropped_open_files.push(path);
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
             }
 
             WindowEvent::KeyboardInput {

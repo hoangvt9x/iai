@@ -16,7 +16,7 @@ use crate::core::tile::{TILE_SIZE, TilePos};
 /// scrub tools feel identical to the paint brush.
 #[inline]
 pub fn dab_coverage(dist2: f32, radius: f32, hardness: f32) -> f32 {
-    super::brush::soft_round_alpha(dist2, radius, hardness)
+    super::brush::legacy_round_alpha(dist2, radius, hardness)
 }
 
 /// Whether the scrub tools can edit `layer`'s paint target: raster pixels, or

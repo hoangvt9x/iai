@@ -6,6 +6,34 @@
 
 use super::*;
 
+/// The style the Type options bar shows (see `ToolViewModel::text_bar`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextBarStyle {
+    pub font_px: f32,
+    pub font_family: crate::core::text::TextFontFamily,
+    pub color: [u8; 4],
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub tracking_px: f32,
+    pub line_height: f32,
+}
+
+impl Default for TextBarStyle {
+    fn default() -> Self {
+        Self {
+            font_px: 48.0,
+            font_family: crate::core::text::TextFontFamily::SegoeUi,
+            color: [0, 0, 0, 255],
+            bold: false,
+            italic: false,
+            underline: false,
+            tracking_px: 0.0,
+            line_height: 1.2,
+        }
+    }
+}
+
 /// The active document as the UI sees it: geometry, colour mode, view,
 /// history counters, the tab strip and the PDF navigator.
 pub struct DocumentViewModel {
@@ -149,6 +177,9 @@ pub struct ToolViewModel {
     pub text_bold: bool,
     pub text_italic: bool,
     pub text_underline: bool,
+    /// What the Type options bar shows: the selected letters' style while
+    /// some are selected (B lit when all of them are bold), else the type's.
+    pub text_bar: TextBarStyle,
     pub text_line_height: f32,
     pub text_tracking_px: f32,
     pub text_opacity: f32,
@@ -158,6 +189,11 @@ pub struct ToolViewModel {
     pub text_flip_y: bool,
     /// The path the edited text is set along.
     pub text_path: Option<crate::core::text::TextPath>,
+    /// The edited text's paragraph box width (see `TextData::box_width`).
+    pub text_box_width: Option<f32>,
+    /// A paragraph box being dragged out with the Type tool: its screen
+    /// rectangle, min and max corners.
+    pub text_box_drag: Option<[f32; 4]>,
     /// Per-character colour/size of the active editing session (empty when
     /// uniform). Aligned 1:1 with `text_buffer` chars.
     pub text_glyph_styles: std::sync::Arc<Vec<crate::core::text::GlyphStyle>>,
@@ -181,6 +217,10 @@ pub struct ToolViewModel {
     pub brush_flow: f32,
     /// Active brush preset index (BRUSH_PRESETS), or PRESET_CUSTOM.
     pub brush_preset_idx: usize,
+    /// The Brush's (and Pencil's) paint mode.
+    pub brush_mode: crate::tools::brush::BrushMode,
+    /// The Brush's airbrush toggle.
+    pub brush_airbrush: bool,
     /// Screen-space position of the right-click brush popup, None when closed.
     pub brush_popup_pos: Option<(f32, f32)>,
     pub brush_color: [u8; 4],
@@ -1373,6 +1413,7 @@ impl Default for UiData {
                 text_bold: false,
                 text_italic: false,
                 text_underline: false,
+                text_bar: TextBarStyle::default(),
                 text_line_height: 1.2,
                 text_tracking_px: 0.0,
                 text_opacity: 1.0,
@@ -1381,6 +1422,8 @@ impl Default for UiData {
                 text_flip_x: false,
                 text_flip_y: false,
                 text_path: None,
+                text_box_width: None,
+                text_box_drag: None,
                 text_glyph_styles: std::sync::Arc::new(Vec::new()),
                 text_selection: None,
                 text_caret: None,
@@ -1394,6 +1437,8 @@ impl Default for UiData {
                 brush_smoothing: 0.0,
                 brush_flow: 1.0,
                 brush_preset_idx: usize::MAX,
+                brush_mode: crate::tools::brush::BrushMode::Normal,
+                brush_airbrush: false,
                 brush_popup_pos: None,
                 brush_color: [0, 0, 0, 255],
                 brush_ink: None,

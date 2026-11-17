@@ -81,12 +81,31 @@ impl App {
             Ok(Ok(())) => {
                 let waiting = self.jobs.print_queue.len();
                 self.shell.status_msg = if waiting == 0 {
-                    "Đã gửi lệnh in".to_string()
+                    self.print_done_note(None)
                 } else {
                     format!("Đã gửi lệnh in — còn {waiting} lệnh đang chờ gửi")
                 };
                 if let Some(task) = self.jobs.print_queue.pop_front() {
                     self.start_print_task(task);
+                }
+            }
+            // A PDF page that could not be rendered (its file moved, say):
+            // that page is left out, the rest of the print goes on, and what
+            // was left out is said once the last sheet has gone.
+            Ok(Err(e))
+                if job.progress.stage() == crate::core::print_gdi::PrintStage::RenderingPage =>
+            {
+                crate::diag::note("print", &format!("PDF page not rendered: {e}"));
+                self.jobs
+                    .print_skipped
+                    .push(if job.page_of.label.is_empty() {
+                        "trang PDF".to_string()
+                    } else {
+                        job.page_of.label.clone()
+                    });
+                match self.jobs.print_queue.pop_front() {
+                    Some(task) => self.start_print_task(task),
+                    None => self.shell.status_msg = self.print_done_note(Some(&e)),
                 }
             }
             Ok(Err(e)) => {
@@ -151,6 +170,7 @@ impl App {
         // What waited behind it would wait on the same printer.
         let dropped = self.jobs.print_queue.len();
         self.jobs.print_queue.clear();
+        self.jobs.print_skipped.clear();
         self.shell.status_msg = if dropped == 0 {
             format!("Đã dừng gửi lệnh in tới «{}»", job.printer)
         } else {
@@ -165,8 +185,33 @@ impl App {
         }
     }
 
-    /// One print task a page of the tab in front, in order: the page as
-    /// export writes it (over its master page, when it shows one).
+    /// What the status line says once the last sheet of a print has gone:
+    /// the pages left out (could not be rendered) too, with why when known.
+    fn print_done_note(&mut self, why: Option<&str>) -> String {
+        let skipped = std::mem::take(&mut self.jobs.print_skipped);
+        if skipped.is_empty() {
+            return "Đã gửi lệnh in".to_string();
+        }
+        const SHOWN: usize = 5;
+        let mut pages = skipped
+            .iter()
+            .take(SHOWN)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if skipped.len() > SHOWN {
+            pages.push_str(&format!("… ({} trang)", skipped.len()));
+        }
+        let why = why.unwrap_or("không dựng được trang để in");
+        format!("Không in được {pages}: {why}")
+    }
+
+    /// The sheets Print sends for the tab in front, in order. A page is
+    /// printed as export writes it (over its master page, when it shows one);
+    /// in an opened PDF, as the tab shows it, and a page never shown is
+    /// rendered by the worker that prints it. Several pages with several
+    /// copies go out a whole set at a time (1, 2, 3, 1, 2, 3), as Acrobat
+    /// collates them.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(in crate::app) fn print_tasks(
         &self,
@@ -174,40 +219,51 @@ impl App {
         layout: crate::core::print::PrintLayout,
         profile: Option<Vec<u8>>,
     ) -> Vec<crate::app::background_jobs::PrintTask> {
+        use crate::app::background_jobs::{PrintTask, PrintedPage};
         let doc = self.docs.active();
-        let indices = match pages {
-            crate::ui::PrintPages::Current => vec![doc.active_artboard],
-            crate::ui::PrintPages::Pages(list) => list.clone(),
+        let (name, sheets) = match doc.pdf_document.as_ref() {
+            Some(pdf) => (
+                pdf.source
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| doc.title.clone()),
+                pdf_print_sheets(doc, pdf, pages),
+            ),
+            None => (doc.title.clone(), artboard_print_sheets(doc, pages)),
         };
-        let several = indices.len() > 1;
-        indices
-            .into_iter()
-            .filter_map(|page| {
-                let canvas = doc.page_render_canvas(page).or_else(|| {
-                    doc.all_page_canvases()
-                        .get(page)
-                        .map(|c| c.export_snapshot())
-                })?;
-                Some(crate::app::background_jobs::PrintTask {
-                    doc_id: doc.id,
-                    page,
-                    doc_name: if several {
-                        format!("{} — trang {}", doc.title, page + 1)
-                    } else {
-                        doc.title.clone()
+        let several = sheets.len() > 1;
+        let copies = self.shell.print_copies.max(1);
+        let (sets, copies_each) = if several { (copies, 1) } else { (1, copies) };
+        let mut tasks = Vec::with_capacity(sheets.len().saturating_mul(sets as usize));
+        for set in 1..=sets {
+            for page in &sheets {
+                let label = match (several, sets > 1) {
+                    (false, _) => String::new(),
+                    (true, false) => format!("trang {}", page.number),
+                    (true, true) => format!("trang {} (bộ {set}/{sets})", page.number),
+                };
+                tasks.push(PrintTask {
+                    of: PrintedPage {
+                        doc: doc.id,
+                        page: page.artboard,
+                        pdf_page: page.pdf_page,
+                        label,
                     },
-                    width: canvas.width,
-                    height: canvas.height,
-                    dpi: canvas.metadata.resolution_ppi,
-                    stack: canvas.layer_stack,
+                    doc_name: if several || page.pdf_page.is_some() {
+                        format!("{name} — trang {}", page.number)
+                    } else {
+                        name.clone()
+                    },
+                    sheet: page.sheet.clone(),
                     layout,
                     profile: profile.clone(),
                     printer: self.shell.print_selected_printer.clone(),
                     settings: self.shell.print_driver_settings.clone(),
-                    copies: self.shell.print_copies,
-                })
-            })
-            .collect()
+                    copies: copies_each,
+                });
+            }
+        }
+        tasks
     }
 
     /// Send `task` now, or after the sheet already on its way.
@@ -236,19 +292,16 @@ impl App {
         task: crate::app::background_jobs::PrintTask,
     ) {
         let crate::app::background_jobs::PrintTask {
-            doc_id,
-            page,
+            of,
             doc_name,
-            mut stack,
-            width: cw,
-            height: ch,
-            dpi,
+            sheet,
             layout,
             profile,
             printer,
             settings,
             copies,
         } = task;
+        let label = of.label.clone();
         let intent = layout.intent.to_lcms();
         let (tx, rx) = std::sync::mpsc::channel();
         // Each stage goes to the journal as the worker enters it: the last one
@@ -262,18 +315,46 @@ impl App {
         let printer_state = std::sync::Arc::new(std::sync::OnceLock::new());
         self.jobs.pending_print = Some(crate::app::background_jobs::PrintJob::new(
             printer.clone(),
-            (doc_id, page),
+            of,
             rx,
             std::sync::Arc::clone(&progress),
             std::sync::Arc::clone(&printer_state),
         ));
         let waiting = self.jobs.print_queue.len();
-        self.shell.status_msg = if waiting == 0 {
-            "Đang gửi lệnh in…".to_string()
-        } else {
-            format!("Đang gửi lệnh in… (còn {waiting} lệnh chờ)")
+        self.shell.status_msg = match (label.is_empty(), waiting) {
+            (true, 0) => "Đang gửi lệnh in…".to_string(),
+            (true, _) => format!("Đang gửi lệnh in… (còn {waiting} lệnh chờ)"),
+            (false, 0) => format!("Đang in {label}…"),
+            (false, _) => format!("Đang in {label}… (còn {waiting} tờ chờ)"),
         };
         std::thread::spawn(move || {
+            // A PDF page never shown is rendered here first, off the window's
+            // thread; it is in memory only while it prints.
+            let (mut stack, cw, ch, dpi) = match sheet {
+                crate::app::background_jobs::PrintSheet::Layers {
+                    stack,
+                    width,
+                    height,
+                    dpi,
+                } => (stack, width, height, dpi),
+                crate::app::background_jobs::PrintSheet::PdfPage { source, index } => {
+                    let rendered = progress
+                        .enter(crate::core::print_gdi::PrintStage::RenderingPage)
+                        .and_then(|()| {
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                source.render(index)
+                            }))
+                            .unwrap_or_else(|_| Err("the PDF renderer stopped".to_string()))
+                        });
+                    match rendered {
+                        Ok(page) => page,
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
+                            return;
+                        }
+                    }
+                }
+            };
             let _ = progress.enter(crate::core::print_gdi::PrintStage::ReadingState);
             if let Some(state) = crate::core::print_gdi::printer_state(&printer) {
                 crate::diag::note(
@@ -514,6 +595,121 @@ impl App {
     }
 }
 
+/// One page Print sends: which page it is as the user counts them (1 being
+/// the first), its artboard, its PDF page in an opened PDF, and its sheet.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+struct PageToPrint {
+    number: usize,
+    artboard: usize,
+    pdf_page: Option<usize>,
+    sheet: crate::app::background_jobs::PrintSheet,
+}
+
+/// The artboards of `doc` asked for, in order, each over its master page
+/// when it shows one. Pages it does not have are left out.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn artboard_print_sheets(
+    doc: &crate::core::document::Document,
+    pages: &crate::ui::PrintPages,
+) -> Vec<PageToPrint> {
+    let indices = match pages {
+        crate::ui::PrintPages::Current => vec![doc.active_artboard],
+        crate::ui::PrintPages::Pages(list) => list.clone(),
+    };
+    indices
+        .into_iter()
+        .filter_map(|page| {
+            let canvas = doc.page_render_canvas(page).or_else(|| {
+                doc.all_page_canvases()
+                    .get(page)
+                    .map(|c| c.export_snapshot())
+            })?;
+            Some(PageToPrint {
+                number: page + 1,
+                artboard: page,
+                pdf_page: None,
+                sheet: crate::app::background_jobs::PrintSheet::Layers {
+                    width: canvas.width,
+                    height: canvas.height,
+                    dpi: canvas.metadata.resolution_ppi,
+                    stack: canvas.layer_stack,
+                },
+            })
+        })
+        .collect()
+}
+
+/// The pages of an opened PDF asked for, as its page bar counts them (0
+/// being the first), in order, each as the tab shows it: the page in front
+/// and the pages edited from their layers, with what was done to every page
+/// laid over them; a page never shown is left to the print worker to render
+/// (see [`PdfPrintSource`]). Pages it does not have are left out.
+///
+/// [`PdfPrintSource`]: crate::app::background_jobs::PdfPrintSource
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn pdf_print_sheets(
+    doc: &crate::core::document::Document,
+    pdf: &crate::core::document::PdfDocumentState,
+    pages: &crate::ui::PrintPages,
+) -> Vec<PageToPrint> {
+    use crate::app::background_jobs::{PdfPrintSource, PrintSheet};
+    let positions = match pages {
+        crate::ui::PrintPages::Current => vec![
+            pdf.selected_pages
+                .iter()
+                .position(|&page| page == pdf.active_page)
+                .unwrap_or(0),
+        ],
+        crate::ui::PrintPages::Pages(list) => list.clone(),
+    };
+    let source = std::sync::Arc::new(PdfPrintSource::new(
+        pdf.effective_source().to_path_buf(),
+        pdf.requested_dpi,
+        pdf.global_edits.clone(),
+    ));
+    positions
+        .into_iter()
+        .filter_map(|position| {
+            let page = *pdf.selected_pages.get(position)?;
+            let shown = if page == pdf.active_page {
+                Some(&doc.canvas)
+            } else {
+                pdf.edited_pages.get(&page).map(|cached| &cached.canvas)
+            };
+            let sheet = match shown {
+                Some(canvas) => {
+                    let mut stack = canvas.export_snapshot().layer_stack;
+                    if let Some(overlay) = crate::core::document::build_pdf_global_overlay_stack(
+                        &pdf.global_edits,
+                        page,
+                        canvas.width,
+                        canvas.height,
+                    ) {
+                        stack = stack.with_overlay(&overlay);
+                    }
+                    PrintSheet::Layers {
+                        stack,
+                        width: canvas.width,
+                        height: canvas.height,
+                        dpi: canvas.metadata.resolution_ppi,
+                    }
+                }
+                None if page < pdf.page_count => PrintSheet::PdfPage {
+                    source: std::sync::Arc::clone(&source),
+                    index: page,
+                },
+                None => return None,
+            };
+            Some(PageToPrint {
+                number: position + 1,
+                artboard: doc.active_artboard,
+                pdf_page: Some(page),
+                sheet,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::app::state::App;
@@ -525,10 +721,27 @@ mod tests {
         std::sync::mpsc::Sender<Result<(), String>>,
         crate::app::background_jobs::PrintJob,
     ) {
+        job_of(
+            printer,
+            crate::app::background_jobs::PrintedPage::alone(
+                crate::core::document::DocumentId(1),
+                0,
+            ),
+        )
+    }
+
+    /// The same, for the page `of`.
+    fn job_of(
+        printer: &str,
+        of: crate::app::background_jobs::PrintedPage,
+    ) -> (
+        std::sync::mpsc::Sender<Result<(), String>>,
+        crate::app::background_jobs::PrintJob,
+    ) {
         let (tx, rx) = std::sync::mpsc::channel();
         let job = crate::app::background_jobs::PrintJob::new(
             printer.to_string(),
-            (crate::core::document::DocumentId(1), 0),
+            of,
             rx,
             Default::default(),
             Default::default(),
@@ -565,7 +778,10 @@ mod tests {
         // The PDF route is for that sheet's tab.
         assert_eq!(
             app.jobs.print_failed_doc,
-            Some((crate::core::document::DocumentId(1), 0))
+            Some(crate::app::background_jobs::PrintedPage::alone(
+                crate::core::document::DocumentId(1),
+                0
+            ))
         );
     }
 
@@ -732,22 +948,394 @@ mod tests {
 
         let tasks = app.print_tasks(&PrintPages::Pages(vec![0, 1, 2]), layout, None);
         assert_eq!(
-            tasks.iter().map(|t| t.page).collect::<Vec<_>>(),
+            tasks.iter().map(|t| t.of.page).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
         let doc = app.docs.active().id;
-        assert!(tasks.iter().all(|t| t.doc_id == doc));
+        assert!(
+            tasks
+                .iter()
+                .all(|t| t.of.doc == doc && t.of.pdf_page.is_none())
+        );
         assert!(tasks[1].doc_name.ends_with("trang 2"));
-        let green = &tasks[1];
-        let flat = green.stack.flatten(green.width, green.height);
-        assert_eq!(&flat[0..3], &[0, 255, 0]);
-        let first = &tasks[0];
-        let flat = first.stack.flatten(first.width, first.height);
-        assert_ne!(&flat[0..3], &[0, 255, 0]);
+        assert_eq!(tasks[1].of.label, "trang 2");
+        assert_eq!(&first_pixel(&tasks[1].sheet)[0..3], &[0, 255, 0]);
+        assert_ne!(&first_pixel(&tasks[0].sheet)[0..3], &[0, 255, 0]);
 
         let tasks = app.print_tasks(&PrintPages::Current, layout, None);
-        assert_eq!(tasks.iter().map(|t| t.page).collect::<Vec<_>>(), vec![0]);
+        assert_eq!(tasks.iter().map(|t| t.of.page).collect::<Vec<_>>(), vec![0]);
         assert!(!tasks[0].doc_name.contains("trang"));
+        assert_eq!(tasks[0].of.label, "", "a sheet alone");
+    }
+
+    /// The pixel at `(fx, fy)` (fractions of the page) of what a print worker
+    /// would composite for `sheet`, rendering a PDF page as it would.
+    fn pixel_at(sheet: &crate::app::background_jobs::PrintSheet, fx: f32, fy: f32) -> [u8; 4] {
+        use crate::app::background_jobs::PrintSheet;
+        let (flat, width, height) = match sheet {
+            PrintSheet::Layers {
+                stack,
+                width,
+                height,
+                ..
+            } => (stack.flatten(*width, *height), *width, *height),
+            PrintSheet::PdfPage { source, index } => {
+                let (stack, width, height, _) = source.render(*index).unwrap();
+                (stack.flatten(width, height), width, height)
+            }
+        };
+        let x = ((width as f32 * fx) as u32).min(width - 1);
+        let y = ((height as f32 * fy) as u32).min(height - 1);
+        let at = ((y * width + x) * 4) as usize;
+        [flat[at], flat[at + 1], flat[at + 2], flat[at + 3]]
+    }
+
+    /// The colour in the left half of a sheet, where nothing is laid over.
+    fn first_pixel(sheet: &crate::app::background_jobs::PrintSheet) -> [u8; 4] {
+        snap(pixel_at(sheet, 0.25, 0.5))
+    }
+
+    /// The colour at the right edge of a sheet.
+    fn right_pixel(sheet: &crate::app::background_jobs::PrintSheet) -> [u8; 4] {
+        snap(pixel_at(sheet, 0.95, 0.5))
+    }
+
+    /// A rendered page's colour, give or take its renderer's rounding.
+    fn snap(rgba: [u8; 4]) -> [u8; 4] {
+        rgba.map(|c| match c {
+            0..=3 => 0,
+            125..=131 => 128,
+            252..=255 => 255,
+            c => c,
+        })
+    }
+
+    /// Several pages with several copies go out a set at a time, every sheet
+    /// once: 1, 2, 3, 1, 2, 3.
+    #[test]
+    fn several_pages_with_several_copies_go_out_a_set_at_a_time() {
+        use crate::ui::PrintPages;
+        use serde_json::json;
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.run_with("file.new", json!({"widthPx": 20, "heightPx": 20}))
+            .unwrap();
+        app.run_with("page.add", json!({})).unwrap();
+        app.shell.print_copies = 3;
+        let layout = app.shell.print_layout;
+
+        let tasks = app.print_tasks(&PrintPages::Pages(vec![0, 1]), layout, None);
+        assert_eq!(
+            tasks.iter().map(|t| t.of.page).collect::<Vec<_>>(),
+            vec![0, 1, 0, 1, 0, 1]
+        );
+        assert!(tasks.iter().all(|t| t.copies == 1));
+        assert_eq!(tasks[0].of.label, "trang 1 (bộ 1/3)");
+        assert_eq!(tasks[5].of.label, "trang 2 (bộ 3/3)");
+
+        // One page: the copies are the driver's, one sheet asked for.
+        let tasks = app.print_tasks(&PrintPages::Current, layout, None);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].copies, 3);
+    }
+
+    /// A folder of the test's own, gone when it ends.
+    struct Folder(std::path::PathBuf);
+
+    impl Folder {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "iai_print_{name}_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn solid_canvas(rgba: [u8; 4], side: u32) -> crate::core::canvas::Canvas {
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(
+            rgba.into_iter()
+                .cycle()
+                .take((side * side * 4) as usize)
+                .collect(),
+            side,
+            side,
+        );
+        canvas.metadata.resolution_ppi = 72.0;
+        canvas
+    }
+
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 255, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const YELLOW: [u8; 4] = [255, 255, 0, 255];
+    const PURPLE: [u8; 4] = [128, 0, 128, 255];
+
+    /// An app whose tab is an opened PDF of four pages, red, green, blue and
+    /// yellow, written to `folder`, shown at 72 DPI: page 2 in front, page 4
+    /// edited to purple and cached, pages 1 and 3 never shown.
+    fn app_with_an_opened_pdf(folder: &Folder) -> App {
+        const SIDE: u32 = 16;
+        let path = folder.0.join("hop-dong.pdf");
+        let pages: Vec<_> = [RED, GREEN, BLUE, YELLOW]
+            .into_iter()
+            .map(|rgba| crate::formats::pdf::ImagePdfPage {
+                rgba: rgba
+                    .into_iter()
+                    .cycle()
+                    .take((SIDE * SIDE * 4) as usize)
+                    .collect(),
+                width: SIDE,
+                height: SIDE,
+                page_points: (SIDE as f32, SIDE as f32),
+            })
+            .collect();
+        crate::formats::pdf::write_image_pdf(&path, &pages).unwrap();
+
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        let reference = |index| {
+            let mut reference = crate::core::document::PdfPageRef {
+                group_id: 1,
+                source: path.clone(),
+                index,
+                count: 4,
+                requested_dpi: 72.0,
+                loaded: true,
+                original_width: 0,
+                original_height: 0,
+                original_dpi: 72.0,
+                original_layer_id: 0,
+                original_tiles_fingerprint: 0,
+            };
+            reference.record_canvas_baseline(&solid_canvas(GREEN, SIDE));
+            reference
+        };
+        let doc = &mut app.docs.documents[0];
+        doc.canvas = solid_canvas(GREEN, SIDE);
+        doc.pdf_page = Some(reference(1));
+        let mut edited = std::collections::HashMap::new();
+        edited.insert(
+            3,
+            crate::core::document::PdfCachedPage {
+                canvas: solid_canvas(PURPLE, SIDE),
+                reference: reference(3),
+                saved_zoom: 0.0,
+                saved_offset_x: 0.0,
+                saved_offset_y: 0.0,
+            },
+        );
+        doc.pdf_document = Some(crate::core::document::PdfDocumentState {
+            source: path,
+            embedded_source: None,
+            page_count: 4,
+            selected_pages: vec![0, 1, 2, 3],
+            selected_pages_saved: vec![0, 1, 2, 3],
+            page_names: std::collections::BTreeMap::new(),
+            page_names_saved: std::collections::BTreeMap::new(),
+            requested_dpi: 72.0,
+            active_page: 1,
+            active_page_modified: false,
+            edited_pages: edited,
+            global_edits: Vec::new(),
+            global_edits_saved: Vec::new(),
+            global_edits_redo: Vec::new(),
+            global_overlay_cache: None,
+        });
+        app
+    }
+
+    /// 17/11/2026: printing an opened PDF sent only the page in front. Every
+    /// page asked for now goes, in order, each as the tab shows it: the page
+    /// in front and an edited page from their layers, a page never shown
+    /// rendered from the file by the print worker (the window renders none).
+    #[test]
+    fn an_opened_pdf_prints_every_page_asked_for_as_the_tab_shows_it() {
+        use crate::app::background_jobs::PrintSheet;
+        use crate::ui::PrintPages;
+        let folder = Folder::new("pdf_pages");
+        let app = app_with_an_opened_pdf(&folder);
+        let layout = app.shell.print_layout;
+
+        let tasks = app.print_tasks(&PrintPages::Pages(vec![0, 1, 2, 3]), layout, None);
+        assert_eq!(
+            tasks.iter().map(|t| t.of.pdf_page).collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2), Some(3)]
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|t| t.of.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["trang 1", "trang 2", "trang 3", "trang 4"]
+        );
+        assert_eq!(tasks[2].doc_name, "hop-dong.pdf — trang 3");
+        let kinds: Vec<bool> = tasks
+            .iter()
+            .map(|t| matches!(t.sheet, PrintSheet::PdfPage { .. }))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![true, false, true, false],
+            "only the pages never shown are left to render"
+        );
+        // The pages left to render share one opened PDF.
+        let (PrintSheet::PdfPage { source: a, .. }, PrintSheet::PdfPage { source: b, .. }) =
+            (&tasks[0].sheet, &tasks[2].sheet)
+        else {
+            unreachable!()
+        };
+        assert!(std::sync::Arc::ptr_eq(a, b));
+        let colours: Vec<[u8; 4]> = tasks.iter().map(|t| first_pixel(&t.sheet)).collect();
+        assert_eq!(colours, vec![RED, GREEN, BLUE, PURPLE]);
+
+        // Typed pages, in the page bar's order; the page in front alone.
+        let tasks = app.print_tasks(&PrintPages::Pages(vec![2, 3]), layout, None);
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|t| first_pixel(&t.sheet))
+                .collect::<Vec<_>>(),
+            vec![BLUE, PURPLE]
+        );
+        let tasks = app.print_tasks(&PrintPages::Current, layout, None);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].of.pdf_page, Some(1));
+        assert_eq!(tasks[0].of.label, "");
+        assert_eq!(first_pixel(&tasks[0].sheet), GREEN);
+    }
+
+    /// A page moved in the page bar prints where it now stands, and what was
+    /// done to every page (a strip cleared on the right) is on the sheets too.
+    #[test]
+    fn an_opened_pdf_prints_in_its_page_order_with_what_was_done_to_every_page() {
+        use crate::ui::PrintPages;
+        let folder = Folder::new("pdf_order");
+        let mut app = app_with_an_opened_pdf(&folder);
+        let pdf = app.docs.documents[0].pdf_document.as_mut().unwrap();
+        pdf.selected_pages = vec![2, 0, 1, 3];
+        pdf.global_edits
+            .push(crate::core::document::PdfGlobalEdit::Clear(
+                crate::core::document::PdfGlobalClear {
+                    x0: 0.5,
+                    y0: 0.0,
+                    x1: 1.0,
+                    y1: 1.0,
+                    color: [255, 255, 255, 255],
+                    target_pages: Vec::new(),
+                },
+            ));
+        let layout = app.shell.print_layout;
+
+        let tasks = app.print_tasks(&PrintPages::Pages(vec![0, 1, 2, 3]), layout, None);
+        assert_eq!(
+            tasks.iter().map(|t| t.of.pdf_page).collect::<Vec<_>>(),
+            vec![Some(2), Some(0), Some(1), Some(3)]
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|t| first_pixel(&t.sheet))
+                .collect::<Vec<_>>(),
+            vec![BLUE, RED, GREEN, PURPLE]
+        );
+        for task in &tasks {
+            assert_eq!(right_pixel(&task.sheet), [255, 255, 255, 255]);
+        }
+    }
+
+    /// A page that cannot be rendered (its PDF moved away) is left out, the
+    /// rest go on, and the end of the print says which pages were left out.
+    #[test]
+    fn a_pdf_page_that_cannot_be_rendered_is_left_out_and_said() {
+        use crate::ui::PrintPages;
+        let folder = Folder::new("pdf_moved");
+        let mut app = app_with_an_opened_pdf(&folder);
+        let pdf = app.docs.documents[0].pdf_document.as_mut().unwrap();
+        pdf.source = folder.0.join("da-chuyen-di.pdf");
+        let layout = app.shell.print_layout;
+        let tasks = app.print_tasks(&PrintPages::Pages(vec![0, 2]), layout, None);
+        for task in tasks {
+            app.queue_print_task(task);
+        }
+        assert_eq!(app.shell.status_msg, "Đã xếp lệnh in — 1 lệnh đang chờ gửi");
+        let began = std::time::Instant::now();
+        while app.jobs.pending_print.is_some() || !app.jobs.print_queue.is_empty() {
+            assert!(began.elapsed().as_secs() < 30, "the worker never answered");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app.poll_print_job();
+        }
+        assert!(app.jobs.print_gdi_failed.is_none(), "no PDF route for it");
+        assert_eq!(
+            app.shell.status_msg,
+            "Không in được trang 1, trang 3: không thấy file PDF «da-chuyen-di.pdf» (đã đổi tên hay chuyển đi?)"
+        );
+        assert!(app.jobs.print_skipped.is_empty());
+    }
+
+    /// A page of an opened PDF the printer refuses stops the print: the
+    /// sheets behind it would go to the same printer.
+    #[test]
+    fn a_pdf_page_the_printer_refuses_stops_the_rest() {
+        use crate::app::background_jobs::PrintedPage;
+        use crate::ui::PrintPages;
+        let folder = Folder::new("pdf_refused");
+        let mut app = app_with_an_opened_pdf(&folder);
+        let layout = app.shell.print_layout;
+        let doc = app.docs.active().id;
+        let behind = app.print_tasks(&PrintPages::Pages(vec![2, 3]), layout, None);
+        app.jobs.print_queue.extend(behind);
+        let (tx, job) = job_of(
+            "Printer",
+            PrintedPage {
+                doc,
+                page: 0,
+                pdf_page: Some(1),
+                label: "trang 2".to_string(),
+            },
+        );
+        app.jobs.pending_print = Some(job);
+        tx.send(Err("out of paper".to_string())).unwrap();
+        app.poll_print_job();
+        app.handle_color_print_actions(&mut crate::ui::UiActions::default());
+        assert!(app.jobs.print_queue.is_empty());
+        assert!(app.jobs.print_gdi_failed.is_none());
+        assert_eq!(
+            app.shell.status_msg,
+            "Máy in không nhận trang 2 (out of paper) — đã dừng, 2 tờ còn lại chưa in; kiểm tra máy in rồi in lại"
+        );
+    }
+
+    /// A worker rendering a PDF page is at its own work: never "a printer
+    /// that does not answer", however long the page takes.
+    #[test]
+    fn a_worker_rendering_a_pdf_page_is_not_a_printer_that_does_not_answer() {
+        use crate::app::background_jobs::PrintJob;
+        use crate::core::print_gdi::PrintStage;
+        let (_tx, mut job) = job_for("Printer");
+        job.progress.enter(PrintStage::RenderingPage).unwrap();
+        job.watch();
+        job.stand_still_for(PrintJob::STUCK_AFTER);
+        assert!(!job.is_stuck());
+        assert!(
+            job.waiting_note()
+                .is_some_and(|note| note.starts_with("Đang dựng trang PDF để in…"))
+        );
+        job.progress.enter(PrintStage::OpeningDevice).unwrap();
+        job.watch();
+        job.stand_still_for(PrintJob::STUCK_AFTER);
+        assert!(job.is_stuck());
     }
 
     #[test]

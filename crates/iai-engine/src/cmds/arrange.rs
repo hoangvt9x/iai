@@ -376,8 +376,8 @@ meta!(
     "layer.rasterize",
     "Raster hóa layer",
     "Rasterize Layer",
-    "Turn a vector path layer into a plain picture layer that brushes paint on; it looks the \
-     same. One undo step."
+    "Turn a vector path layer, or a type layer, into a plain picture layer that brushes paint \
+     on; it looks the same (a type layer's words can no longer be edited). One undo step."
 );
 
 pub struct Rasterize;
@@ -398,6 +398,29 @@ impl Command for Rasterize {
             .get(idx)
             .map(|l| l.id)
             .ok_or_else(|| CmdError::internal("layer index"))?;
+        let is_type = canvas
+            .layer_stack
+            .layers
+            .get(idx)
+            .is_some_and(|l| matches!(l.layer_type, iai_doc::layer::LayerType::Text(_)));
+        if is_type {
+            // A type layer's pixels are already its words drawn: they stay,
+            // the words go (Photoshop's Rasterize Type).
+            let (w, h) = (canvas.width, canvas.height);
+            let mut cmd =
+                LayerStructureCommand::capture_before("Rasterize Type", &canvas.layer_stack, w, h);
+            if let Some(l) = canvas.layer_stack.layers.get_mut(idx) {
+                l.layer_type = iai_doc::layer::LayerType::Raster;
+            }
+            cmd.capture_after(&canvas.layer_stack, w, h);
+            canvas.record_as(
+                Box::new(cmd),
+                iai_history::gateway::ChangeKind::LayerStructure,
+            );
+            canvas.layer_revision = canvas.layer_revision.saturating_add(1);
+            canvas.flatten_full();
+            return answer(s, doc, Some(id)).map(Plan::Done);
+        }
         canvas
             .execute(
                 Box::new(iai_vector::command_vector::RasterizeVectorLayer::new(id)),

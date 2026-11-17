@@ -2,6 +2,34 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+17/11/2026
+- Cọ (Brush) và Tẩy (Eraser) nay vẽ giống Photoshop: cọ mềm tỏa mềm ra quá mép vòng tròn như Photoshop (trước đây tắt hẳn ở mép nên nét mảnh và nhạt hơn), cọ cứng có mép mịn, các mức độ cứng ra đúng như Photoshop. Đã đặt từng nét cạnh nét của Photoshop để so: gần như trùng khít.
+- Phím [ ] đổi cỡ cọ như Photoshop, cọ càng to bước càng lớn (cọ to bấm ] không còn bị tụt về 300 px); Shift+[ ] đổi độ cứng mỗi lần một phần tư. Cọ to nhất đủ 5000 px.
+- Phím số đổi độ đậm (Opacity) như Photoshop: 1 là 10 %, 5 là 50 %, 0 là 100 %, gõ nhanh hai số (4 rồi 5) là 45 %; giữ Shift thì đổi Flow.
+- Giữ Shift rồi bấm: kẻ đường thẳng từ chỗ nét trước dừng lại. Giữ Shift khi kéo: nét chạy thẳng ngang hoặc thẳng dọc.
+- Thanh tùy chọn của Cọ có thêm ô Mode (Multiply, Screen, Overlay, Color, Behind, Clear…) và nút Airbrush (giữ chuột đứng yên thì màu tiếp tục đậm lên).
+- Smooth (làm mượt) nay đưa nét tới đúng chỗ nhả chuột, dừng tay thì nét tự đuổi kịp con trỏ, và mượt như nhau dù dùng chuột nào.
+- Alt + chuột phải kéo: kéo ngang đổi cỡ cọ, kéo dọc đổi độ cứng.
+- Layer đã khóa (Lock) không còn bị tô nhầm lên. Tẩy trên layer khóa phần trong suốt thì tô màu nền như Photoshop, không làm thủng layer.
+- Bút chì (Pencil) vẽ sắc từng điểm ảnh như Photoshop, nét 1 px liền mạch; thanh tùy chọn chỉ còn những ô bút chì dùng. Tẩy có đủ các ô như Cọ (chọn kiểu cọ, Flow, Spacing, Smooth).
+- Làm sáng / làm tối (Dodge / Burn) nay ăn giống Photoshop: cùng Exposure, cùng vùng tối / giữa / sáng thì ra sáng tối y như Photoshop. Trước đây làm sáng vùng sáng gần như không ăn, các vùng khác lúc mạnh lúc nhẹ hơn Photoshop.
+- Dodge / Burn bật Protect Tones: da và màu giữ nguyên sắc, làm sáng chỗ sáng không còn bị bạc trắng.
+- Dodge / Burn: trong một lần kéo, rê đi rê lại chỉ sáng (tối) tới một mức như Photoshop; muốn thêm thì nhả chuột rồi kéo lần nữa. Giữ Alt khi bấm thì Dodge thành Burn và ngược lại; phím số đổi Exposure.
+- App nhớ cỡ, độ cứng, độ đậm… của Cọ, Tẩy, Dodge và Burn, tắt mở lại vẫn y như lần trước.
+- Thanh tab luôn bắt đầu từ tab đầu tiên; nút mũi tên ▾ chỉ liệt kê các tab phía sau, đúng thứ tự. Tab đang làm việc luôn hiện trên thanh (nằm ô cuối nếu không đủ chỗ).
+- Mở cùng lúc nhiều ảnh (Ctrl+O chọn nhiều file, hoặc kéo thả nhiều file): tab xếp theo tên như trong thư mục, ảnh cuối cùng được hiện và nằm ở tab cuối, màn hình không còn nhảy qua lại. Kéo thả nhiều ảnh RAW không còn làm máy nặng.
+- Chữ (Text): bấm vào chữ để sửa và gõ chữ nhanh hơn hẳn, nhất là chữ to.
+- Chữ căn giữa / căn phải: điểm bấm là tâm / mép phải dòng chữ, chữ nằm trên điểm bấm như Photoshop; đổi cỡ chữ hay gõ thêm thì chữ giữ nguyên chỗ, không xô lệch.
+- Đang sửa chữ mà không bôi đen: đổi cỡ, màu, font, đậm / nghiêng đổi cả khối chữ. Bôi đen một đoạn thì thanh trên hiện đúng cỡ, font, màu của đoạn đó.
+- Cầm công cụ Text, chọn một layer chữ rồi đổi font, cỡ, màu… trên thanh trên: cả layer đổi theo, không cần vào sửa.
+- Xóa hết chữ rồi bấm Commit: layer chữ đó được xóa (Ctrl+Z để lấy lại). Ctrl+Enter cũng chốt chữ như Photoshop.
+- Tên layer chữ tự đặt không còn bị đổi mỗi lần sửa chữ. Layer chữ đã khóa không sửa được nữa.
+- Ô cỡ chữ có thêm ô pt (theo độ phân giải ảnh) như Photoshop. Menu Layer ▸ Rasterize Layer nay dùng được cho layer chữ; cầm cọ vẽ lên layer chữ thì app báo cần Rasterize trước.
+- Công cụ Text: kéo chuột thành một khung rồi gõ, chữ tự xuống dòng trong khung như Photoshop; kéo ô vuông nhỏ ở cạnh phải khung để khung rộng hay hẹp lại.
+- Bôi đen một đoạn chữ rồi đổi khoảng cách chữ (Tracking) hay giãn dòng (Line height), hoặc bấm Alt + mũi tên: chỉ đoạn đó đổi, như Photoshop.
+- Mở nhiều ảnh RAW trong cửa sổ Develop rồi bấm Open: ảnh cuối được hiện và nằm ở tab cuối.
+- In file PDF nhiều trang (Ctrl+P): nay chọn được «Tất cả các trang», «Trang đang xem» hoặc gõ số trang cần in, ví dụ 1-3, 5. Trang chưa mở cũng in được, các trang ra lần lượt đúng thứ tự, mỗi trang một tờ; in nhiều bản thì ra từng bộ đủ trang. Gõ sai hay quá số trang thì hộp In báo ngay.
+
 16/11/2026
 - Ctrl+T, bấm chuột phải ▸ Warp: nay có lưới 3×3 như Photoshop. Kéo 4 góc, kéo tay nắm xanh cạnh mỗi góc, hoặc kéo bất kỳ chỗ nào trong lưới để uốn ảnh; Ctrl+Z lùi từng lần kéo, Enter (hoặc dấu ✓) áp dụng, Esc hủy.
 - Warp (cả Ctrl+T ▸ Warp lẫn Filter ▸ Warp) kéo mượt hơn hẳn, kể cả ảnh lớn: lúc đang kéo app vẽ nhanh phần ảnh vừa đổi, nhả chuột mới vẽ mịn.

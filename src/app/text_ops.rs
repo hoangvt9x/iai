@@ -13,6 +13,18 @@ use crate::core::tile::TileMap;
 use crate::tools::ToolId;
 
 fn text_edit_origin_for_layer(td: &TextData, layer: &Layer) -> (i32, i32) {
+    // The layer is the type as it was last written (its raster's size): the
+    // origin is its offset less the placement delta, learnt from the layout
+    // alone. Drawing the whole text to find it took 0.2–0.9 s on a large
+    // heading (flight recorder 26/10–12/11).
+    if let Some(((w, h), delta)) = crate::core::text::placed_size_and_delta(td)
+        && (layer.width, layer.height) == (w, h)
+    {
+        return (
+            layer.offset.0.saturating_sub(delta.0),
+            layer.offset.1.saturating_sub(delta.1),
+        );
+    }
     let Some((placed, delta)) = rasterize_placed(td) else {
         return layer.offset;
     };
@@ -78,6 +90,48 @@ fn refont_origin_from_bounds(
         (old_cx - new_cx).round() as i32 - delta.0,
         (old_cy - new_cy).round() as i32 - delta.1,
     )
+}
+
+/// A type layer's own style, to tell when it changed (an undo, a restyle).
+fn type_style_fingerprint(td: &TextData) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    td.font_px.to_bits().hash(&mut h);
+    td.font_family.hash(&mut h);
+    td.color.hash(&mut h);
+    td.align.hash(&mut h);
+    td.bold.hash(&mut h);
+    td.italic.hash(&mut h);
+    td.underline.hash(&mut h);
+    td.line_height.to_bits().hash(&mut h);
+    td.tracking_px.to_bits().hash(&mut h);
+    td.opacity.to_bits().hash(&mut h);
+    h.finish()
+}
+
+/// Where `td`'s anchor (see `TextEditState::anchor`) lies from its origin on
+/// the page: the anchor in its upright raster, stretched, mirrored and turned
+/// as `rasterize_placed` places the raster. `None` for text on a path.
+fn anchor_offset(td: &TextData) -> Option<(f32, f32)> {
+    let (ax, ay) = crate::core::text::anchor_in_raster(td)?;
+    let stretch = if td.stretch_x.is_finite() && td.stretch_x > 0.001 {
+        td.stretch_x
+    } else {
+        1.0
+    };
+    let x = if td.flip_x {
+        -ax * stretch
+    } else {
+        ax * stretch
+    };
+    let y = if td.flip_y { -ay } else { ay };
+    let angle = if td.rotation_deg.is_finite() {
+        td.rotation_deg.to_radians()
+    } else {
+        0.0
+    };
+    let (s, c) = angle.sin_cos();
+    Some((c * x - s * y, s * x + c * y))
 }
 
 /// Default font size that reads well on a canvas of the given dimensions
@@ -202,6 +256,122 @@ impl App {
         };
         self.run_with("vector.to_curves", serde_json::json!({"layer": id}))
             .is_ok()
+    }
+
+    /// What the Type options bar shows: while letters are selected, their
+    /// style (the first one's size, font and colour; B / I / U lit when all
+    /// of them have it), else the type's own.
+    pub(crate) fn text_bar_style(&self) -> crate::ui::TextBarStyle {
+        let base = crate::ui::TextBarStyle {
+            font_px: self.edit.text_font_px,
+            font_family: self.edit.text_font_family.clone(),
+            color: self.edit.text_color,
+            bold: self.edit.text_bold,
+            italic: self.edit.text_italic,
+            underline: self.edit.text_underline,
+            tracking_px: self.edit.text_tracking_px,
+            line_height: self.edit.text_line_height,
+        };
+        let Some(s) = self.edit.text_edit.as_ref() else {
+            return base;
+        };
+        let n = s.buffer.chars().count();
+        let Some(range) = s
+            .selection
+            .clone()
+            .filter(|r| r.start < r.end && r.end <= n)
+        else {
+            return base;
+        };
+        if s.glyph_styles.len() != n {
+            return base;
+        }
+        let Some(picked) = s.glyph_styles.get(range.clone()) else {
+            return base;
+        };
+        let Some(first) = picked.first() else {
+            return base;
+        };
+        crate::ui::TextBarStyle {
+            font_px: first.font_px,
+            font_family: first.font_family.clone(),
+            color: first.color,
+            bold: picked.iter().all(|g| g.bold),
+            italic: picked.iter().all(|g| g.italic),
+            underline: picked.iter().all(|g| g.underline),
+            tracking_px: first.tracking_px.unwrap_or(base.tracking_px),
+            line_height: first.line_height.unwrap_or(base.line_height),
+        }
+    }
+
+    /// Tracking / line height set while editing: with letters selected, as
+    /// theirs (true); with none, every letter's own goes (the whole text
+    /// takes what the caller sets: false). Not editing: false.
+    pub(crate) fn apply_text_spacing_to_selection(
+        &mut self,
+        tracking_px: Option<f32>,
+        line_height: Option<f32>,
+    ) -> bool {
+        let selection = self
+            .edit
+            .text_edit
+            .as_ref()
+            .and_then(|s| s.selection.clone())
+            .or_else(|| {
+                self.text_overlay_selection()
+                    .filter(|range| range.start < range.end)
+            });
+        let base = crate::core::text::GlyphStyle {
+            color: self.edit.text_color,
+            font_px: self.edit.text_font_px,
+            font_family: self.edit.text_font_family.clone(),
+            bold: self.edit.text_bold,
+            italic: self.edit.text_italic,
+            underline: self.edit.text_underline,
+            tracking_px: None,
+            line_height: None,
+        };
+        let Some(s) = self.edit.text_edit.as_mut() else {
+            return false;
+        };
+        let n = s.buffer.chars().count();
+        match selection {
+            Some(range) if range.start < range.end && range.start < n => {
+                if s.glyph_styles.len() != n {
+                    s.glyph_styles = (0..n)
+                        .map(|i| s.glyph_styles.get(i).cloned().unwrap_or(base.clone()))
+                        .collect();
+                }
+                for style in s
+                    .glyph_styles
+                    .iter_mut()
+                    .take(range.end.min(n))
+                    .skip(range.start)
+                {
+                    if tracking_px.is_some() {
+                        style.tracking_px = tracking_px;
+                    }
+                    if line_height.is_some() {
+                        style.line_height = line_height;
+                    }
+                }
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                true
+            }
+            _ => {
+                for style in &mut s.glyph_styles {
+                    if tracking_px.is_some() {
+                        style.tracking_px = None;
+                    }
+                    if line_height.is_some() {
+                        style.line_height = None;
+                    }
+                }
+                false
+            }
+        }
     }
 
     /// True when the active layer is an editable Text layer.
@@ -509,6 +679,7 @@ impl App {
             glyph_styles,
             path: None,
             fill: None,
+            box_width: None,
         };
         // Keep glyph_styles either empty (uniform) or exactly one per char.
         if !td.glyph_styles.is_empty() {
@@ -518,9 +689,195 @@ impl App {
         td
     }
 
+    /// With the Type tool in hand and a type layer picked, not being edited:
+    /// that layer's id, its style taken as the working style the first time
+    /// (and again when the layer changes), so the options bar shows it and
+    /// new type starts from it. `None` otherwise (and for a locked layer).
+    pub(crate) fn adopt_picked_type_style(&mut self) -> Option<u32> {
+        let picked = (self.edit.tools.active_id() == ToolId::Text && self.edit.text_edit.is_none())
+            .then(|| {
+                let stack = &self.docs.active().canvas.layer_stack;
+                if stack.is_none_picked() {
+                    return None;
+                }
+                let layer = stack.layers.get(stack.active_idx)?;
+                let LayerType::Text(td) = &layer.layer_type else {
+                    return None;
+                };
+                (!(layer.locked && !layer.is_background)).then(|| (layer.id, td.clone()))
+            })
+            .flatten();
+        let Some((id, td)) = picked else {
+            self.edit.text_style_layer = None;
+            return None;
+        };
+        let key = (id, type_style_fingerprint(&td));
+        if self.edit.text_style_layer != Some(key) {
+            self.edit.text_style_layer = Some(key);
+            self.ensure_text_font_registered(&td.font_family);
+            self.edit.text_font_px = td.font_px;
+            self.edit.text_font_px_auto = false;
+            self.edit.text_font_family = td.font_family.clone();
+            self.edit.text_color = td.color;
+            self.edit.text_align = td.align;
+            self.edit.text_bold = td.bold;
+            self.edit.text_italic = td.italic;
+            self.edit.text_underline = td.underline;
+            self.edit.text_line_height = td.line_height;
+            self.edit.text_tracking_px = td.tracking_px;
+            self.edit.text_opacity = td.opacity;
+        }
+        Some(id)
+    }
+
+    /// Write the options bar's change into the picked type layer (see
+    /// [`Self::adopt_picked_type_style`]) once the mouse is let go: what the
+    /// bar now says, over the whole layer, its anchor kept still; one step.
+    pub(crate) fn finish_picked_type_restyle(&mut self) {
+        let Some(id) = self.edit.text_restyle_pending else {
+            return;
+        };
+        if self.win.egui_ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        self.edit.text_restyle_pending = None;
+        // Still the layer the bar shows (not another picked meanwhile).
+        if self.edit.text_style_layer.map(|(picked, _)| picked) != Some(id) {
+            return;
+        }
+        let doc = self.docs.active().id;
+        let (td, origin) = {
+            let canvas = &self.docs.active().canvas;
+            let Some(layer) = canvas.layer_stack.layers.iter().find(|l| l.id == id) else {
+                return;
+            };
+            let LayerType::Text(td) = &layer.layer_type else {
+                return;
+            };
+            (td.clone(), text_edit_origin_for_layer(td, layer))
+        };
+        let mut new_td = td.clone();
+        let base = |t: &TextData| crate::core::text::GlyphStyle {
+            color: t.color,
+            font_px: t.font_px,
+            font_family: t.font_family.clone(),
+            bold: t.bold,
+            italic: t.italic,
+            underline: t.underline,
+            tracking_px: None,
+            line_height: None,
+        };
+        let old_base = base(&td);
+        new_td.font_px = self.edit.text_font_px;
+        new_td.font_family = self.edit.text_font_family.clone();
+        new_td.color = self.edit.text_color;
+        new_td.bold = self.edit.text_bold;
+        new_td.italic = self.edit.text_italic;
+        new_td.underline = self.edit.text_underline;
+        new_td.align = self.edit.text_align;
+        new_td.line_height = self.edit.text_line_height;
+        new_td.tracking_px = self.edit.text_tracking_px;
+        let new_base = base(&new_td);
+        // What changed goes to every letter, those styled on their own too.
+        for g in &mut new_td.glyph_styles {
+            if new_base.font_px != old_base.font_px {
+                g.font_px = new_base.font_px;
+            }
+            if new_base.font_family != old_base.font_family {
+                g.font_family = new_base.font_family.clone();
+            }
+            if new_base.color != old_base.color {
+                g.color = new_base.color;
+            }
+            if new_base.bold != old_base.bold {
+                g.bold = new_base.bold;
+            }
+            if new_base.italic != old_base.italic {
+                g.italic = new_base.italic;
+            }
+            if new_base.underline != old_base.underline {
+                g.underline = new_base.underline;
+            }
+            // The whole text's spacing: no letter keeps its own.
+            if new_td.tracking_px != td.tracking_px {
+                g.tracking_px = None;
+            }
+            if new_td.line_height != td.line_height {
+                g.line_height = None;
+            }
+        }
+        new_td.compact_glyph_styles();
+        if new_td == td {
+            return;
+        }
+        // The anchor (first baseline, at the alignment's side) stays still.
+        let origin = match (anchor_offset(&td), anchor_offset(&new_td)) {
+            (Some(old), Some(new)) => (
+                (origin.0 as f32 + old.0 - new.0).round() as i32,
+                (origin.1 as f32 + old.1 - new.1).round() as i32,
+            ),
+            _ => origin,
+        };
+        let args = serde_json::json!({
+            "doc": doc.0,
+            "layer": id,
+            "type": iai_engine::cmds::text::TypeSpec::of(&new_td),
+            "origin": [origin.0, origin.1],
+            "label": "Format Text",
+        });
+        if let Err(error) = self.run_with("text.set", args) {
+            crate::diag::note("text", &format!("restyle refused: {error:?}"));
+        }
+    }
+
+    /// The type of the session open now, as it would be written.
+    fn session_text_data(&self) -> Option<TextData> {
+        let s = self.edit.text_edit.as_ref()?;
+        let mut td = self.text_data_from_state(s.buffer.clone(), s.glyph_styles.clone());
+        td.rotation_deg = s.rotation_deg;
+        td.stretch_x = s.stretch_x;
+        td.flip_x = s.flip_x;
+        td.flip_y = s.flip_y;
+        td.path = s.path.clone();
+        td.box_width = s.box_width;
+        Some(td)
+    }
+
+    /// Keep the open type's anchor still while it is typed, resized,
+    /// realigned or restyled, as Photoshop's point type: `origin` follows it.
+    /// Opened again, the anchor is first learnt from `origin`.
+    pub(crate) fn sync_text_anchor(&mut self) {
+        let Some(td) = self.session_text_data() else {
+            return;
+        };
+        let Some((dx, dy)) = anchor_offset(&td) else {
+            return;
+        };
+        let Some(s) = self.edit.text_edit.as_mut() else {
+            return;
+        };
+        match s.anchor {
+            None => s.anchor = Some((s.origin.0 as f32 + dx, s.origin.1 as f32 + dy)),
+            Some((x, y)) => {
+                let origin = ((x - dx).round() as i32, (y - dy).round() as i32);
+                if origin != s.origin {
+                    s.origin = origin;
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+        }
+    }
+
     /// Hit-test editable text layers from top to bottom at a canvas-space point.
     pub fn text_layer_at(&self, cx: f32, cy: f32) -> Option<usize> {
-        const TEXT_HIT_PAD: i32 = 8;
+        // Some 8 screen points round the letters at any zoom: 8 page pixels
+        // were one point on a large photo seen small, so a click just beside
+        // the words made new type instead of editing them.
+        const TEXT_HIT_PAD_POINTS: f32 = 8.0;
+        let zoom = self.edit.view.zoom.max(0.01);
+        let pad = (TEXT_HIT_PAD_POINTS / zoom).ceil().clamp(1.0, 100_000.0) as i32;
 
         let canvas = &self.docs.active().canvas;
         let x = cx.floor() as i32;
@@ -537,10 +894,10 @@ impl App {
             // content_bounds is pixel-accurate, so the padded bbox test is the
             // whole hit-test (any opaque pixel lies inside the bbox).
             if let Some((min_x, min_y, max_x, max_y)) = layer.tiles.content_bounds()
-                && lx >= min_x - TEXT_HIT_PAD
-                && lx < max_x + TEXT_HIT_PAD
-                && ly >= min_y - TEXT_HIT_PAD
-                && ly < max_y + TEXT_HIT_PAD
+                && lx >= min_x - pad
+                && lx < max_x + pad
+                && ly >= min_y - pad
+                && ly < max_y + pad
             {
                 return Some(idx);
             }
@@ -556,10 +913,27 @@ impl App {
             self.deny_modal_action();
             return;
         }
-        self.begin_new_text(cx, cy);
+        self.begin_new_text(cx, cy, None);
     }
 
-    fn begin_new_text(&mut self, cx: f32, cy: f32) {
+    /// A paragraph box dragged out with the Type tool, corner to corner on
+    /// the canvas: type that wraps in it (too narrow a drag: point type at
+    /// its start, as a click).
+    pub fn text_tool_box(&mut self, from: (f32, f32), to: (f32, f32)) {
+        if self.edit.text_edit.is_some() {
+            self.deny_modal_action();
+            return;
+        }
+        let (x0, y0) = (from.0.min(to.0), from.1.min(to.1));
+        let width = (from.0 - to.0).abs();
+        if width < 4.0 {
+            self.begin_new_text(from.0, from.1, None);
+            return;
+        }
+        self.begin_new_text(x0, y0, Some(width));
+    }
+
+    fn begin_new_text(&mut self, cx: f32, cy: f32, box_width: Option<f32>) {
         self.edit.text_font_preview = None;
         let (cw, ch) = {
             let d = self.docs.active();
@@ -601,7 +975,12 @@ impl App {
             selection: None,
             caret: Some(0),
             pending_style: None,
+            // Where the click was: the first line's baseline sits on it
+            // (a paragraph box's top-left corner).
+            anchor: Some((cx, cy)),
+            box_width,
         });
+        self.sync_text_anchor();
         self.edit.text_focus_pending = true;
 
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
@@ -612,6 +991,23 @@ impl App {
 
     /// Re-open an existing text layer for editing (double-click).
     pub fn begin_edit_text_layer(&mut self, idx: usize) {
+        // A locked type layer is not opened (its words could be changed
+        // under the lock): it says so instead.
+        let locked = self
+            .docs
+            .active()
+            .canvas
+            .layer_stack
+            .layers
+            .get(idx)
+            .is_some_and(|l| l.locked && !l.is_background);
+        if locked {
+            self.shell.status_msg = "Layer chữ đang khóa — mở khóa rồi mới sửa chữ".to_string();
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
         self.edit.text_font_preview = None;
         if self.edit.text_edit.is_some() {
             self.commit_text_edit();
@@ -694,6 +1090,8 @@ impl App {
             selection: None,
             caret,
             pending_style: None,
+            anchor: None,
+            box_width: td.box_width,
             orig: Some(td),
             before_cmd: Some(before),
         });
@@ -721,6 +1119,8 @@ impl App {
             bold: self.edit.text_bold,
             italic: self.edit.text_italic,
             underline: self.edit.text_underline,
+            tracking_px: None,
+            line_height: None,
         };
         let Some(s) = &mut self.edit.text_edit else {
             return;
@@ -740,13 +1140,6 @@ impl App {
         let te_id = egui::Id::new("text_overlay_te");
         let st = egui::TextEdit::load_state(&self.win.egui_ctx, te_id)?;
         Some(st.cursor.char_range()?.as_sorted_char_range())
-    }
-
-    /// Current caret char index in the editing overlay (primary cursor).
-    fn text_overlay_caret(&self) -> Option<usize> {
-        let te_id = egui::Id::new("text_overlay_te");
-        let st = egui::TextEdit::load_state(&self.win.egui_ctx, te_id)?;
-        Some(st.cursor.char_range()?.primary.index)
     }
 
     pub fn update_text_cursor_cache(
@@ -873,8 +1266,12 @@ impl App {
     }
 
     /// Apply a colour and/or size override to the current text selection while
-    /// editing. With no selection it becomes a pending style for the next typed
-    /// character. Must be called BEFORE updating the app-level default so the
+    /// editing: true, and the caller leaves the text's own style alone (the
+    /// letters not selected, the lines' measures, keep it — setting it too
+    /// made every line as tall as the letters last enlarged, 17/11). With no
+    /// selection it goes to the whole block (false): every letter styled on
+    /// its own here, the rest through the new default the caller sets. Must
+    /// be called BEFORE updating the app-level default so the
     /// materialization seed reflects the unselected characters' prior style.
     pub fn apply_text_style_to_selection(
         &mut self,
@@ -884,7 +1281,7 @@ impl App {
         bold: Option<bool>,
         italic: Option<bool>,
         underline: Option<bool>,
-    ) {
+    ) -> bool {
         let base = crate::core::text::GlyphStyle {
             color: self.edit.text_color,
             font_px: self.edit.text_font_px,
@@ -892,6 +1289,8 @@ impl App {
             bold: self.edit.text_bold,
             italic: self.edit.text_italic,
             underline: self.edit.text_underline,
+            tracking_px: None,
+            line_height: None,
         };
         let selection = self
             .edit
@@ -902,14 +1301,8 @@ impl App {
                 self.text_overlay_selection()
                     .filter(|range| range.start < range.end)
             });
-        let caret = self
-            .edit
-            .text_edit
-            .as_ref()
-            .and_then(|s| s.caret)
-            .or_else(|| self.text_overlay_caret());
         let Some(s) = &mut self.edit.text_edit else {
-            return;
+            return false;
         };
         let n = s.buffer.chars().count();
         let apply = |style: &mut crate::core::text::GlyphStyle| {
@@ -935,8 +1328,8 @@ impl App {
                 style.underline = v;
             }
         };
-        match selection {
-            Some(range) if range.start < range.end => {
+        let on_selection = match selection {
+            Some(range) if range.start < range.end && range.start < n => {
                 if s.glyph_styles.len() != n {
                     s.glyph_styles = (0..n)
                         .map(|i| s.glyph_styles.get(i).cloned().unwrap_or(base.clone()))
@@ -948,25 +1341,41 @@ impl App {
                     }
                 }
                 s.pending_style = None;
+                true
             }
             _ => {
-                let caret = caret.unwrap_or(n).min(n);
-                let mut style = s.pending_style.clone().map(|(_, st)| st).unwrap_or(base);
-                apply(&mut style);
-                s.pending_style = Some((caret, style));
+                // Nothing selected: the whole block, as the caller's new
+                // default does for letters without a style of their own —
+                // letters styled one by one change too (they used to keep
+                // theirs, so the same click changed all of one block and
+                // none of another).
+                for style in &mut s.glyph_styles {
+                    apply(style);
+                }
+                s.pending_style = None;
+                false
             }
-        }
+        };
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
+        on_selection
     }
 
     fn apply_text_font_family_choice(&mut self, family: crate::core::text::TextFontFamily) {
         self.ensure_text_font_registered(&family);
-        if self.edit.text_edit.is_some() {
-            self.apply_text_style_to_selection(None, None, Some(family.clone()), None, None, None);
+        let on_selection = self.edit.text_edit.is_some()
+            && self.apply_text_style_to_selection(
+                None,
+                None,
+                Some(family.clone()),
+                None,
+                None,
+                None,
+            );
+        if !on_selection {
+            self.edit.text_font_family = family;
         }
-        self.edit.text_font_family = family;
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -1046,6 +1455,7 @@ impl App {
         td.flip_x = session.flip_x;
         td.flip_y = session.flip_y;
         td.path = session.path.clone();
+        td.box_width = session.box_width;
         // A gradient across the letters is not the Type tool's: it stays.
         td.fill = session.orig.as_ref().and_then(|o| o.fill.clone());
 
@@ -1113,6 +1523,14 @@ impl App {
                 // wrote it.
                 crate::diag::note("text", &format!("text.set refused: {error:?}"));
                 self.write_text_directly(doc_idx, &session, td, &label);
+            }
+        } else if empty && !session.is_new {
+            // Every letter of a type layer deleted, then committed: the
+            // layer goes, as one step (it used to come back unchanged, as if
+            // the deleting had not been heard).
+            let args = serde_json::json!({"doc": session.doc_id.0, "layer": session.layer_id});
+            if let Err(error) = self.run_with("layer.delete", args) {
+                crate::diag::note("text", &format!("emptied type layer kept: {error:?}"));
             }
         }
 
@@ -1210,7 +1628,20 @@ impl App {
         };
         let is_active = doc_idx == self.docs.active_doc_idx;
         let canvas = &mut self.docs.documents[doc_idx].canvas;
-        if let Some(idx) = canvas
+        if let Some(mut before) = session.before_cmd {
+            // The page as it was when the session began, kept whole: no
+            // redrawing of the old text (a large heading took 0.8 s).
+            use crate::core::command::Command as _;
+            let (mut w, mut h) = (canvas.width, canvas.height);
+            let mut ctx = crate::core::command::EditContext::new(
+                &mut canvas.layer_stack,
+                &mut w,
+                &mut h,
+                None,
+            );
+            let _ = before.undo(&mut ctx);
+            canvas.layer_revision += 1;
+        } else if let Some(idx) = canvas
             .layer_stack
             .layers
             .iter()
@@ -1703,26 +2134,205 @@ mod tests {
         assert!(doc1.is_modified(), "the owning document carries the change");
     }
 
+    /// Nothing selected: a style goes to the whole block, letters styled on
+    /// their own included (it used to go to the next letter typed only, which
+    /// in a uniform block changed all of it and in a mixed one none of it).
     #[test]
-    fn pending_style_survives_backspace_then_applies_on_type() {
+    fn a_style_with_nothing_selected_goes_to_the_whole_block() {
         let mut app = App::new();
         app.text_tool_click(5.0, 5.0);
-        app.update_text_buffer("ab".to_string());
-        // Colour picked with the caret at the end and no selection → pending.
-        app.update_text_cursor_cache(None, Some(2));
+        app.update_text_buffer("abcd".to_string());
+        // "bc" red on their own.
+        app.update_text_cursor_cache(Some(1..3), Some(3));
         app.apply_text_style_to_selection(Some([200, 30, 30, 255]), None, None, None, None, None);
-
-        app.update_text_buffer("a".to_string());
-        app.update_text_cursor_cache(None, Some(1));
-        app.update_text_buffer("ax".to_string());
-
+        // Then blue with nothing selected, as the options bar does it (the
+        // letters first, then the default).
+        app.update_text_cursor_cache(None, Some(4));
+        app.apply_text_style_to_selection(Some([0, 0, 200, 255]), None, None, None, None, None);
+        app.edit.text_color = [0, 0, 200, 255];
         let s = app.edit.text_edit.as_ref().expect("session still open");
-        assert_eq!(s.glyph_styles.len(), 2);
+        assert_eq!(s.glyph_styles.len(), 4);
+        assert!(s.glyph_styles.iter().all(|g| g.color == [0, 0, 200, 255]));
+        assert!(s.pending_style.is_none());
+    }
+
+    /// The options bar shows the selected letters' style.
+    #[test]
+    fn the_options_bar_shows_the_selected_letters_style() {
+        let mut app = App::new();
+        app.text_tool_click(5.0, 5.0);
+        app.update_text_buffer("abcd".to_string());
+        app.update_text_cursor_cache(Some(1..3), Some(3));
+        app.apply_text_style_to_selection(None, Some(90.0), None, Some(true), None, None);
+        let bar = app.text_bar_style();
+        assert_eq!((bar.font_px, bar.bold), (90.0, true));
+        // "cd": not all bold, the first one's size.
+        app.update_text_cursor_cache(Some(2..4), Some(4));
+        let bar = app.text_bar_style();
+        assert_eq!((bar.font_px, bar.bold), (90.0, false));
+        // Nothing selected: the type's own.
+        app.update_text_cursor_cache(None, Some(4));
+        let bar = app.text_bar_style();
         assert_eq!(
-            s.glyph_styles[1].color,
-            [200, 30, 30, 255],
-            "pending colour must survive the Backspace and land on the typed char"
+            (bar.font_px, bar.bold),
+            (app.edit.text_font_px, app.edit.text_bold)
         );
+    }
+
+    /// A type layer emptied of its words and committed goes, as one step.
+    #[test]
+    fn an_emptied_type_layer_goes() {
+        let (mut app, idx) = app_with_text("Xin chào");
+        app.shell.ui.show_welcome = false;
+        let id = app.docs.documents[0].canvas.layer_stack.layers[idx].id;
+        let steps = app.docs.documents[0].canvas.undo_count();
+        app.begin_edit_text_layer(idx);
+        app.update_text_buffer(String::new());
+        app.commit_text_edit();
+        let canvas = &app.docs.documents[0].canvas;
+        assert!(canvas.layer_stack.layers.iter().all(|l| l.id != id));
+        assert_eq!(canvas.undo_count(), steps + 1);
+        app.docs.documents[0].canvas.undo();
+        assert!(matches!(
+            app.docs.documents[0]
+                .canvas
+                .layer_stack
+                .layers
+                .iter()
+                .find(|l| l.id == id)
+                .map(|l| &l.layer_type),
+            Some(LayerType::Text(td)) if td.content == "Xin chào"
+        ));
+    }
+
+    /// With the Type tool and a type layer picked, the options bar shows its
+    /// style, and a change made there goes to the layer, as one step.
+    #[test]
+    fn a_picked_type_layer_takes_the_options_bars_change() {
+        let (mut app, idx) = app_with_text("Tiêu đề");
+        app.shell.ui.show_welcome = false;
+        app.edit.tools.select(ToolId::Text);
+        app.edit.text_font_px = 12.0;
+        let id = app
+            .adopt_picked_type_style()
+            .expect("the picked type layer");
+        assert_eq!(app.edit.text_font_px, 48.0);
+        let steps = app.docs.documents[0].canvas.undo_count();
+        app.edit.text_font_px = 80.0;
+        app.edit.text_restyle_pending = Some(id);
+        app.finish_picked_type_restyle();
+        let canvas = &app.docs.documents[0].canvas;
+        assert!(matches!(
+            &canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Text(td) if td.font_px == 80.0 && td.content == "Tiêu đề"
+        ));
+        assert_eq!(canvas.undo_count(), steps + 1);
+        assert!(app.edit.text_restyle_pending.is_none());
+    }
+
+    /// Tracking and line height go to the selected letters while some are
+    /// selected, else to the whole text (and no letter keeps its own).
+    #[test]
+    fn spacing_goes_to_the_selected_letters_or_the_whole_text() {
+        let mut app = App::new();
+        app.text_tool_click(5.0, 5.0);
+        app.update_text_buffer("abcd".to_string());
+        app.update_text_cursor_cache(Some(1..3), Some(3));
+        assert!(app.apply_text_spacing_to_selection(Some(12.0), Some(2.0)));
+        let s = app.edit.text_edit.as_ref().expect("a session");
+        let own: Vec<_> = s.glyph_styles.iter().map(|g| g.tracking_px).collect();
+        assert_eq!(own, vec![None, Some(12.0), Some(12.0), None]);
+        assert_eq!(app.text_bar_style().tracking_px, 12.0);
+        assert_eq!(app.text_bar_style().line_height, 2.0);
+        // Nothing selected: the letters' own go; the caller sets the text's.
+        app.update_text_cursor_cache(None, Some(4));
+        assert!(!app.apply_text_spacing_to_selection(Some(3.0), None));
+        let s = app.edit.text_edit.as_ref().expect("a session");
+        assert!(s.glyph_styles.iter().all(|g| g.tracking_px.is_none()));
+        assert_eq!(s.glyph_styles[1].line_height, Some(2.0));
+    }
+
+    /// A drag with the Type tool makes paragraph type: a box as wide as the
+    /// drag, its top-left corner where the drag began, the words wrapping in
+    /// it; the box can be made another width while editing.
+    #[test]
+    fn a_drag_makes_a_paragraph_box() {
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.edit.text_font_family = crate::core::text::TextFontFamily::DejaVuSans;
+        app.edit.text_font_px = 30.0;
+        app.edit.text_font_px_auto = false;
+        app.text_tool_box((300.0, 200.0), (100.0, 260.0));
+        if crate::core::text::font_for(&app.edit.text_font_family).is_none() {
+            return; // no font here
+        }
+        let s = app.edit.text_edit.as_ref().expect("a session");
+        assert_eq!(s.box_width, Some(200.0));
+        app.update_text_buffer("Một hai ba bốn năm sáu bảy tám chín mười".to_string());
+        app.sync_text_anchor();
+        let td = app.session_text_data().expect("the type");
+        let (left, top, ..) = crate::core::text::box_in_raster(&td).expect("a box");
+        let s = app.edit.text_edit.as_ref().expect("a session");
+        assert!((s.origin.0 as f32 + left - 100.0).abs() <= 1.0);
+        assert!((s.origin.1 as f32 + top - 200.0).abs() <= 1.0);
+        let (_, h) = crate::core::text::upright_size(&td).expect("size");
+        assert!(h > 80, "wrapped: {h}");
+        app.commit_text_edit();
+        let canvas = &app.docs.documents[0].canvas;
+        assert!(canvas.layer_stack.layers.iter().any(|l| matches!(
+            &l.layer_type,
+            LayerType::Text(td) if td.box_width == Some(200.0)
+        )));
+    }
+
+    /// A locked type layer is not opened for editing.
+    #[test]
+    fn a_locked_type_layer_is_not_opened() {
+        let (mut app, idx) = app_with_text("Khóa");
+        app.docs.documents[0].canvas.layer_stack.layers[idx].locked = true;
+        app.begin_edit_text_layer(idx);
+        assert!(app.edit.text_edit.is_none());
+    }
+
+    /// Centred type keeps its anchor (the click, on the first baseline)
+    /// still while it is typed and resized, as Photoshop's point type.
+    #[test]
+    fn centred_type_grows_round_its_anchor() {
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.edit.text_align = crate::core::text::TextAlign::Center;
+        app.edit.text_font_family = crate::core::text::TextFontFamily::DejaVuSans;
+        app.edit.text_font_px = 40.0;
+        app.edit.text_font_px_auto = false;
+        app.text_tool_click(400.0, 300.0);
+        if crate::core::text::font_for(&app.edit.text_font_family).is_none() {
+            return; // no font here
+        }
+        let anchor_now = |app: &App| {
+            let td = app.session_text_data().expect("a session");
+            let (dx, dy) = super::anchor_offset(&td).expect("straight type");
+            let s = app.edit.text_edit.as_ref().expect("a session");
+            (s.origin.0 as f32 + dx, s.origin.1 as f32 + dy)
+        };
+        let close =
+            |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() <= 1.0 && (a.1 - b.1).abs() <= 1.0;
+        app.update_text_buffer("Tiêu đề".to_string());
+        app.sync_text_anchor();
+        assert!(
+            close(anchor_now(&app), (400.0, 300.0)),
+            "{:?}",
+            anchor_now(&app)
+        );
+        let narrow = app.edit.text_edit.as_ref().expect("a session").origin;
+        app.edit.text_font_px = 80.0;
+        app.sync_text_anchor();
+        assert!(
+            close(anchor_now(&app), (400.0, 300.0)),
+            "{:?}",
+            anchor_now(&app)
+        );
+        // Bigger, centred: it grew to the left as much as to the right.
+        assert!(app.edit.text_edit.as_ref().expect("a session").origin.0 < narrow.0);
     }
 
     #[test]
@@ -1764,6 +2374,8 @@ mod tests {
                 bold: i == 0,
                 italic: i == 1,
                 underline: i == 2,
+                tracking_px: None,
+                line_height: None,
             })
             .collect();
         app.edit.text_edit.as_mut().unwrap().glyph_styles = original_styles.clone();

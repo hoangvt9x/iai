@@ -1,0 +1,37 @@
+dab_9_h0: brush=computedBrush diameter=9 hardness=0 spacing=25 opacity=100 flow=100
+dab_9_h50: brush=computedBrush diameter=9 hardness=50 spacing=25 opacity=100 flow=100
+dab_9_h100: brush=computedBrush diameter=9 hardness=100 spacing=25 opacity=100 flow=100
+dab_50_h0: brush=computedBrush diameter=50 hardness=0 spacing=25 opacity=100 flow=100
+dab_50_h25: brush=computedBrush diameter=50 hardness=25 spacing=25 opacity=100 flow=100
+dab_50_h50: brush=computedBrush diameter=50 hardness=50 spacing=25 opacity=100 flow=100
+dab_50_h75: brush=computedBrush diameter=50 hardness=75 spacing=25 opacity=100 flow=100
+dab_50_h90: brush=computedBrush diameter=50 hardness=90 spacing=25 opacity=100 flow=100
+dab_50_h100: brush=computedBrush diameter=50 hardness=100 spacing=25 opacity=100 flow=100
+dab_300_h0: brush=computedBrush diameter=300 hardness=0 spacing=25 opacity=100 flow=100
+dab_300_h50: brush=computedBrush diameter=300 hardness=50 spacing=25 opacity=100 flow=100
+dab_300_h100: brush=computedBrush diameter=300 hardness=100 spacing=25 opacity=100 flow=100
+dab_1500_h0: brush=computedBrush diameter=1500 hardness=0 spacing=25 opacity=100 flow=100
+dab_1500_h100: brush=computedBrush diameter=1500 hardness=100 spacing=25 opacity=100 flow=100
+dab_50_h0_sub: brush=computedBrush diameter=50 hardness=0 spacing=25 opacity=100 flow=100
+line_50_h0_sp1: brush=computedBrush diameter=50 hardness=0 spacing=1 opacity=100 flow=100
+line_50_h0_sp25: brush=computedBrush diameter=50 hardness=0 spacing=25 opacity=100 flow=100
+line_50_h0_sp100: brush=computedBrush diameter=50 hardness=0 spacing=100 opacity=100 flow=100
+line_50_h100_sp1: brush=computedBrush diameter=50 hardness=100 spacing=1 opacity=100 flow=100
+line_50_h100_sp25: brush=computedBrush diameter=50 hardness=100 spacing=25 opacity=100 flow=100
+line_50_h100_sp100: brush=computedBrush diameter=50 hardness=100 spacing=100 opacity=100 flow=100
+line_50_h0_op100_fl30: brush=computedBrush diameter=50 hardness=0 spacing=25 opacity=100 flow=30
+line_50_h0_op50_fl100: brush=computedBrush diameter=50 hardness=0 spacing=25 opacity=50 flow=100
+line_50_h0_op50_fl30: brush=computedBrush diameter=50 hardness=0 spacing=25 opacity=50 flow=30
+zigzag_40_h50_op50: brush=computedBrush diameter=40 hardness=50 spacing=25 opacity=50 flow=100
+cross_40_h100_op50: brush=computedBrush diameter=40 hardness=100 spacing=25 opacity=50 flow=100
+stack20_300_h0_op5: brush=computedBrush diameter=300 hardness=0 spacing=25 opacity=5 flow=100
+stack20_300_h0_op5_16bit: brush=computedBrush diameter=300 hardness=0 spacing=25 opacity=5 flow=100
+thin_1_h100: brush=computedBrush diameter=1 hardness=100 spacing=25 opacity=100 flow=100
+thin_2_h100: brush=computedBrush diameter=2 hardness=100 spacing=25 opacity=100 flow=100
+thin_3_h100: brush=computedBrush diameter=3 hardness=100 spacing=25 opacity=100 flow=100
+thin_3_h0: brush=computedBrush diameter=3 hardness=0 spacing=25 opacity=100 flow=100
+thin_6_h0: brush=computedBrush diameter=6 hardness=0 spacing=25 opacity=100 flow=100
+pencil_1: brush=computedBrush diameter=1 hardness=100 spacing=25 opacity=100
+pencil_5: brush=computedBrush diameter=5 hardness=100 spacing=25 opacity=100
+pencil_5_op50: brush=computedBrush diameter=5 hardness=100 spacing=25 opacity=50
+painted 36

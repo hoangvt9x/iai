@@ -443,40 +443,98 @@ pub struct TransformOverlayData {
     pub alternate_handles: bool,
 }
 
+/// A fingerprint of everything that changes how `td` is drawn: the editing
+/// preview is drawn again when it changes. Every field is named (no `..`), so
+/// a field added to the type, its letters' styles, its path or its fill stops
+/// the build until it is counted here — the box width and the letters' own
+/// spacing were not, and the preview kept its old picture until a zoom or a
+/// commit (17/11).
 fn text_preview_hash(td: &crate::core::text::TextData) -> u64 {
+    let crate::core::text::TextData {
+        content,
+        font_px,
+        color,
+        font_family,
+        align,
+        line_height,
+        bold,
+        italic,
+        underline,
+        tracking_px,
+        opacity,
+        stretch_x,
+        rotation_deg,
+        flip_x,
+        flip_y,
+        glyph_styles,
+        path,
+        fill,
+        box_width,
+    } = td;
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    td.content.hash(&mut h);
-    td.font_px.to_bits().hash(&mut h);
-    td.color.hash(&mut h);
-    td.font_family.hash(&mut h);
-    td.align.hash(&mut h);
-    td.line_height.to_bits().hash(&mut h);
-    td.bold.hash(&mut h);
-    td.italic.hash(&mut h);
-    td.underline.hash(&mut h);
-    td.tracking_px.to_bits().hash(&mut h);
-    td.opacity.to_bits().hash(&mut h);
-    td.stretch_x.to_bits().hash(&mut h);
-    td.rotation_deg.to_bits().hash(&mut h);
-    td.flip_x.hash(&mut h);
-    td.flip_y.hash(&mut h);
-    if let Some(p) = &td.path {
-        for q in &p.points {
+    content.hash(&mut h);
+    font_px.to_bits().hash(&mut h);
+    color.hash(&mut h);
+    font_family.hash(&mut h);
+    align.hash(&mut h);
+    line_height.to_bits().hash(&mut h);
+    bold.hash(&mut h);
+    italic.hash(&mut h);
+    underline.hash(&mut h);
+    tracking_px.to_bits().hash(&mut h);
+    opacity.to_bits().hash(&mut h);
+    stretch_x.to_bits().hash(&mut h);
+    rotation_deg.to_bits().hash(&mut h);
+    flip_x.hash(&mut h);
+    flip_y.hash(&mut h);
+    box_width.map(f32::to_bits).hash(&mut h);
+    if let Some(crate::core::text::TextPath {
+        points,
+        closed,
+        start,
+        offset,
+        flip,
+        source,
+        source_sig,
+    }) = path
+    {
+        for q in points {
             q[0].to_bits().hash(&mut h);
             q[1].to_bits().hash(&mut h);
         }
-        p.closed.hash(&mut h);
-        p.start.to_bits().hash(&mut h);
-        p.offset.to_bits().hash(&mut h);
-        p.flip.hash(&mut h);
+        closed.hash(&mut h);
+        start.to_bits().hash(&mut h);
+        offset.to_bits().hash(&mut h);
+        flip.hash(&mut h);
+        source.hash(&mut h);
+        source_sig.hash(&mut h);
     }
-    for gs in &td.glyph_styles {
-        gs.color.hash(&mut h);
-        gs.font_px.to_bits().hash(&mut h);
-        gs.font_family.hash(&mut h);
-        gs.bold.hash(&mut h);
-        gs.italic.hash(&mut h);
-        gs.underline.hash(&mut h);
+    if let Some(crate::core::text::TextFill { stops, angle_deg }) = fill {
+        for (rgba, at) in stops {
+            rgba.hash(&mut h);
+            at.to_bits().hash(&mut h);
+        }
+        angle_deg.to_bits().hash(&mut h);
+    }
+    for crate::core::text::GlyphStyle {
+        color,
+        font_px,
+        font_family,
+        bold,
+        italic,
+        underline,
+        tracking_px,
+        line_height,
+    } in glyph_styles
+    {
+        color.hash(&mut h);
+        font_px.to_bits().hash(&mut h);
+        font_family.hash(&mut h);
+        bold.hash(&mut h);
+        italic.hash(&mut h);
+        underline.hash(&mut h);
+        tracking_px.map(f32::to_bits).hash(&mut h);
+        line_height.map(f32::to_bits).hash(&mut h);
     }
     h.finish()
 }
@@ -486,37 +544,39 @@ fn text_preview_texture(
     td: &crate::core::text::TextData,
     zoom: f32,
 ) -> Option<(egui::TextureHandle, u32, u32)> {
-    // Drawn as large as the zoom shows it (the next power of two, up to 16x,
-    // within some 40 megapixels), so the letters stay sharp while typing at
-    // high zoom instead of showing the page's square pixels. The size handed
-    // back is the page's.
-    let mut k = 1u32;
-    while (k as f32) < zoom && k < 16 {
-        k *= 2;
+    // Drawn as large as the zoom shows it (the next power of two, from 1/16x
+    // to 16x), so the letters stay sharp while typing at high zoom instead of
+    // showing the page's square pixels, and a page seen small is not drawn
+    // at full size for each letter typed. At most some 12 megapixels, judged
+    // from the layout before anything is drawn: a large heading drawn at 2x
+    // or 4x took 0.2–0.3 s a keystroke (flight recorder 26/10–12/11). The
+    // size handed back is the page's.
+    const PREVIEW_MAX_PIXELS: f64 = 12_000_000.0;
+    let mut k = 1.0_f32 / 16.0;
+    while k < zoom && k < 16.0 {
+        k *= 2.0;
     }
-    let scaled = |k: u32| {
+    let scaled = |k: f32| {
         let mut t = td.clone();
-        let f = k as f32;
-        t.font_px *= f;
-        t.tracking_px *= f;
-        for g in &mut t.glyph_styles {
-            g.font_px *= f;
-        }
+        // Sizes, spacing and a paragraph box together (the box left out,
+        // the words wrapped after nearly every letter when zoomed, 17/11).
+        crate::core::text::scale_letters(&mut t, k);
         if let Some(p) = &mut t.path {
             for q in &mut p.points {
-                q[0] *= f;
-                q[1] *= f;
+                q[0] *= k;
+                q[1] *= k;
             }
-            p.offset *= f;
+            p.offset *= k;
         }
         t
     };
     // Cache check first: rasterizing runs every frame the overlay is open,
-    // and only the miss path may pay for a full rasterization.
+    // and only the miss path may pay for a full rasterization (the cap below
+    // follows from the text and the zoom's `k`, both in the key).
     let hash = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         text_preview_hash(td).hash(&mut h);
-        k.hash(&mut h);
+        k.to_bits().hash(&mut h);
         h.finish()
     };
     let cache_id = egui::Id::new("text_overlay_raster_preview_texture");
@@ -526,19 +586,25 @@ fn text_preview_texture(
     {
         return Some((texture, w, h));
     }
-    let mut raster = crate::core::text::rasterize_stretched(&scaled(k))?;
-    while k > 1 && u64::from(raster.width) * u64::from(raster.height) > 40_000_000 {
-        k /= 2;
-        raster = crate::core::text::rasterize_stretched(&scaled(k))?;
+    let page_size = crate::core::text::upright_size(td);
+    if let Some((w, h)) = page_size {
+        while k > 1.0 / 16.0
+            && f64::from(w) * f64::from(h) * f64::from(k) * f64::from(k) > PREVIEW_MAX_PIXELS
+        {
+            k /= 2.0;
+        }
     }
-    let (w, h) = (
-        ((raster.width as f32 / k as f32).round() as u32).max(1),
-        ((raster.height as f32 / k as f32).round() as u32).max(1),
-    );
-    let options = if k > 1 {
-        egui::TextureOptions::LINEAR
-    } else {
+    let raster = crate::core::text::rasterize_stretched(&scaled(k))?;
+    // The page's size: the layout's own when known (a scaled raster rounds
+    // its margins at its own size).
+    let (w, h) = page_size.unwrap_or((
+        ((raster.width as f32 / k).round() as u32).max(1),
+        ((raster.height as f32 / k).round() as u32).max(1),
+    ));
+    let options = if k == 1.0 {
         egui::TextureOptions::NEAREST
+    } else {
+        egui::TextureOptions::LINEAR
     };
     let image = egui::ColorImage::from_rgba_unmultiplied(
         [raster.width as usize, raster.height as usize],
@@ -3866,27 +3932,30 @@ fn draw_brush_popup(ctx: &mut egui::Ui, data: &UiData, actions: &mut UiActions) 
 
                     let mut size = data.tool.brush_size;
                     if widgets::dev_slider(ui, "Size", &mut size, 1.0..=1000.0) {
-                        actions.tool.brush_size = Some(size);
+                        actions.tool.brush.push(BrushParam::Size(size));
                     }
                     let mut hard = data.tool.brush_hardness * 100.0;
                     if widgets::dev_slider(ui, "Hardness", &mut hard, 0.0..=100.0) {
-                        actions.tool.brush_hardness = Some(hard / 100.0);
+                        actions.tool.brush.push(BrushParam::Hardness(hard / 100.0));
                     }
                     let mut op = data.tool.brush_opacity * 100.0;
                     if widgets::dev_slider(ui, "Opacity", &mut op, 1.0..=100.0) {
-                        actions.tool.brush_opacity = Some(op / 100.0);
+                        actions.tool.brush.push(BrushParam::Opacity(op / 100.0));
                     }
                     let mut flow = data.tool.brush_flow * 100.0;
                     if widgets::dev_slider(ui, "Flow", &mut flow, 1.0..=100.0) {
-                        actions.tool.brush_flow = Some(flow / 100.0);
+                        actions.tool.brush.push(BrushParam::Flow(flow / 100.0));
                     }
                     let mut spacing = data.tool.brush_spacing * 100.0;
                     if widgets::dev_slider(ui, "Spacing", &mut spacing, 1.0..=200.0) {
-                        actions.tool.brush_spacing = Some(spacing / 100.0);
+                        actions
+                            .tool
+                            .brush
+                            .push(BrushParam::Spacing(spacing / 100.0));
                     }
                     let mut sm = data.tool.brush_smoothing * 100.0;
                     if widgets::dev_slider(ui, "Smoothing", &mut sm, 0.0..=100.0) {
-                        actions.tool.brush_smoothing = Some(sm / 100.0);
+                        actions.tool.brush.push(BrushParam::Smoothing(sm / 100.0));
                     }
                 });
             });
@@ -3907,6 +3976,27 @@ fn draw_text_editing_overlay(
     let zoom = data.doc.zoom;
     let ox = data.doc.offset_x;
     let oy = data.doc.offset_y;
+    // A paragraph box being dragged out with the Type tool.
+    if let Some([x0, y0, x1, y1]) = data.tool.text_box_drag {
+        let painter = ctx
+            .layer_painter(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new("text_box_drag_frame"),
+            ))
+            .with_clip_rect(canvas_viewport);
+        let phase = ctx.input(|i| i.time as f32 * 12.0) % 12.0;
+        paint_contrast_polyline(
+            &painter,
+            &[
+                egui::pos2(x0, y0),
+                egui::pos2(x1, y0),
+                egui::pos2(x1, y1),
+                egui::pos2(x0, y1),
+                egui::pos2(x0, y0),
+            ],
+            phase,
+        );
+    }
     if data.tool.text_editing {
         let (mx, my) = data.tool.text_overlay_pos;
         let screen_font =
@@ -3953,6 +4043,7 @@ fn draw_text_editing_overlay(
             } else {
                 Vec::new()
             },
+            box_width: data.tool.text_box_width,
         };
         let te_id = egui::Id::new("text_overlay_te");
         let saved_text_range =
@@ -3961,26 +4052,27 @@ fn draw_text_editing_overlay(
             .as_ref()
             .is_some_and(|range| !range.is_empty())
             || data.tool.text_selection.is_some();
-        // Photoshop-style spacing shortcuts while a text range is selected.
-        // Consume them before TextEdit sees the event; otherwise Alt+Arrow
-        // may move/collapse its cursor instead of preserving the selection.
+        // Photoshop's spacing keys while a text range is selected: the
+        // selected letters' tracking and line height. Consume them before
+        // TextEdit sees the event; otherwise Alt+Arrow may move/collapse its
+        // cursor instead of preserving the selection.
         if has_text_selection {
             let alt = egui::Modifiers::ALT;
             if ctx.input_mut(|i| i.consume_key(alt, egui::Key::ArrowLeft)) {
                 actions.tool.set_text_tracking_px =
-                    Some((data.tool.text_tracking_px - 1.0).clamp(-200.0, 500.0));
+                    Some((data.tool.text_bar.tracking_px - 1.0).clamp(-200.0, 500.0));
             }
             if ctx.input_mut(|i| i.consume_key(alt, egui::Key::ArrowRight)) {
                 actions.tool.set_text_tracking_px =
-                    Some((data.tool.text_tracking_px + 1.0).clamp(-200.0, 500.0));
+                    Some((data.tool.text_bar.tracking_px + 1.0).clamp(-200.0, 500.0));
             }
             if ctx.input_mut(|i| i.consume_key(alt, egui::Key::ArrowUp)) {
                 actions.tool.set_text_line_height =
-                    Some((data.tool.text_line_height - 0.05).clamp(0.5, 4.0));
+                    Some((data.tool.text_bar.line_height - 0.05).clamp(0.5, 4.0));
             }
             if ctx.input_mut(|i| i.consume_key(alt, egui::Key::ArrowDown)) {
                 actions.tool.set_text_line_height =
-                    Some((data.tool.text_line_height + 0.05).clamp(0.5, 4.0));
+                    Some((data.tool.text_bar.line_height + 0.05).clamp(0.5, 4.0));
             }
         }
         let text_scale = (zoom / ctx.pixels_per_point()).max(0.001);
@@ -4146,13 +4238,94 @@ fn draw_text_editing_overlay(
             let grab_offset = ctx
                 .data(|d| d.get_temp::<(f32, f32)>(drag_id))
                 .unwrap_or((9.0 / zoom, 8.0 / zoom));
+            // The words may run off the page's edges, as with the Move tool
+            // (kept within a few pages of it).
+            let (w, h) = (data.doc.canvas_w as f32, data.doc.canvas_h as f32);
             let cx = ((pos.x - ox) / zoom - grab_offset.0)
                 .round()
-                .clamp(0.0, data.doc.canvas_w as f32) as i32;
+                .clamp(-4.0 * w, 5.0 * w) as i32;
             let cy = ((pos.y - oy) / zoom - grab_offset.1)
                 .round()
-                .clamp(0.0, data.doc.canvas_h as f32) as i32;
-            actions.tool.text_move_origin = Some((cx, cy));
+                .clamp(-4.0 * h, 5.0 * h) as i32;
+            actions.tool.text_frame = Some(crate::ui::TextFrameAsk::Move((cx, cy)));
+        }
+
+        // Paragraph type: its box, and a handle on its right edge to make it
+        // wider or narrower (the words wrap again as it is dragged).
+        if preview_drawn
+            && let Some((left, top, box_w, box_h)) = crate::core::text::box_in_raster(&preview_td)
+        {
+            let stretch = data.tool.text_stretch_x.max(0.001);
+            let local = |x: f32, y: f32| {
+                text_local_to_screen(
+                    text_origin,
+                    x * stretch,
+                    y,
+                    text_scale,
+                    data.tool.text_rotation_deg,
+                    data.tool.text_flip_x,
+                    data.tool.text_flip_y,
+                )
+            };
+            let corners = [
+                local(left, top),
+                local(left + box_w, top),
+                local(left + box_w, top + box_h),
+                local(left, top + box_h),
+                local(left, top),
+            ];
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new("text_box_frame"),
+                ))
+                .with_clip_rect(canvas_viewport);
+            painter.add(egui::Shape::line(
+                corners.to_vec(),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_gray(150)),
+            ));
+            let grip = local(left + box_w, top + box_h * 0.5);
+            // Above the invisible editing box, which covers this edge.
+            let grip_resp = egui::Area::new(egui::Id::new("text_box_width_handle"))
+                .fixed_pos(grip - egui::vec2(6.0, 6.0))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::drag());
+                    let fill = if response.dragged() || response.hovered() {
+                        egui::Color32::from_rgb(90, 160, 255)
+                    } else {
+                        egui::Color32::WHITE
+                    };
+                    let square = egui::Rect::from_center_size(rect.center(), egui::vec2(8.0, 8.0));
+                    ui.painter().rect_filled(square, 0.0, fill);
+                    ui.painter().rect_stroke(
+                        square,
+                        0.0,
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40)),
+                        egui::StrokeKind::Outside,
+                    );
+                    if response.hovered() || response.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        actions.tool.text_drag_handle_hovered = true;
+                    }
+                    response.on_hover_text("Box width")
+                })
+                .inner;
+            if grip_resp.dragged()
+                && let Some(pos) = grip_resp.interact_pointer_pos()
+            {
+                let (tx, _) = text_screen_to_local(
+                    text_origin,
+                    pos,
+                    text_scale,
+                    data.tool.text_rotation_deg,
+                    data.tool.text_flip_x,
+                    data.tool.text_flip_y,
+                );
+                let width = (tx / stretch - left).max(8.0 / zoom.max(0.01)).max(1.0);
+                actions.tool.text_frame = Some(crate::ui::TextFrameAsk::BoxWidth(width));
+            }
         }
 
         // The raster pads (font_px*0.2) around the glyphs; shift the
@@ -4613,11 +4786,15 @@ fn draw_brush_preview(painter: &egui::Painter, rect: egui::Rect, hardness: f32, 
     let center = rect.center();
     let max_r = rect.width().min(rect.height()) * 0.42;
     let [r, g, b] = [255u8, 255, 255];
+    // The tip drawn at a 100 px scale, so its whole reach (a soft tip's bell
+    // runs past its radius) fits the swatch without the pixel edge showing.
+    const TIP: f32 = 100.0;
+    let per_px = crate::tools::brush::tip_reach(TIP, hardness) / max_r.max(1.0);
     let steps = 18;
     for k in 0..=steps {
         let radius = max_r * (1.0 - k as f32 / steps as f32);
-        let dist = radius.max(0.0);
-        let a = crate::tools::brush::soft_round_alpha(dist * dist, max_r, hardness);
+        let dist = radius.max(0.0) * per_px;
+        let a = crate::tools::brush::soft_round_alpha(dist * dist, TIP, hardness);
         let alpha = (a * 130.0).round().clamp(0.0, 255.0) as u8;
         painter.circle_filled(
             center,
@@ -5066,6 +5243,91 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
 
     if !open {
         actions.dialogs.paint_color_dialog_cancel = true;
+    }
+}
+
+#[cfg(test)]
+mod text_preview_tests {
+    use super::{text_preview_hash, text_preview_texture};
+
+    /// A change made while editing shows at once, at the same zoom: the box
+    /// made wider, a letter's own spacing or line height (17/11: these kept
+    /// the old picture until a zoom or a commit).
+    #[test]
+    fn the_editing_preview_follows_every_change_at_once() {
+        let td = crate::core::text::TextData {
+            content: "Xin chao cac ban\nthan men".to_string(),
+            font_family: crate::core::text::TextFontFamily::DejaVuSans,
+            font_px: 32.0,
+            box_width: Some(140.0),
+            ..Default::default()
+        };
+        let mut wider = td.clone();
+        wider.box_width = Some(260.0);
+        let mut spaced = td.clone();
+        spaced.ensure_glyph_styles();
+        spaced.glyph_styles[2].tracking_px = Some(30.0);
+        let mut taller = td.clone();
+        taller.ensure_glyph_styles();
+        taller.glyph_styles[20].line_height = Some(3.0);
+        let mut uniform = td.clone();
+        uniform.ensure_glyph_styles();
+        for changed in [&wider, &spaced, &taller, &uniform] {
+            assert_ne!(text_preview_hash(changed), text_preview_hash(&td));
+        }
+        if crate::core::text::upright_size(&td).is_none() {
+            return; // no font here
+        }
+        let ctx = egui::Context::default();
+        // What the preview was last drawn for.
+        let drawn_for = |ctx: &egui::Context| {
+            ctx.data(|d| {
+                d.get_temp::<(u64, egui::TextureHandle, u32, u32)>(egui::Id::new(
+                    "text_overlay_raster_preview_texture",
+                ))
+            })
+            .map(|(hash, _, w, h)| (hash, w, h))
+        };
+        let _ = text_preview_texture(&ctx, &td, 2.0).expect("a preview");
+        let first = drawn_for(&ctx).expect("drawn");
+        for changed in [&wider, &spaced, &taller] {
+            let (_, cw, ch) = text_preview_texture(&ctx, changed, 2.0).expect("a preview");
+            let now = drawn_for(&ctx).expect("drawn");
+            assert_ne!(now.0, first.0, "the preview was drawn again");
+            assert_eq!(Some((cw, ch)), crate::core::text::upright_size(changed));
+        }
+        // The wider box: a wider picture.
+        let (_, ww, _) = text_preview_texture(&ctx, &wider, 2.0).expect("a preview");
+        assert!(ww > first.1);
+    }
+
+    /// The editing preview of paragraph type is drawn at the zoom's scale
+    /// with its box scaled alike: the page size it gives is the type's own
+    /// and the drawing is that size times the zoom's factor, not a column
+    /// of letters squeezed into it (17/11: the box was left out).
+    #[test]
+    fn a_paragraph_box_preview_keeps_its_shape_at_any_zoom() {
+        let td = crate::core::text::TextData {
+            content: "Xin chao cac ban than men".to_string(),
+            font_family: crate::core::text::TextFontFamily::DejaVuSans,
+            font_px: 32.0,
+            box_width: Some(140.0),
+            ..Default::default()
+        };
+        let Some((w, h)) = crate::core::text::upright_size(&td) else {
+            return; // no font here
+        };
+        let ctx = egui::Context::default();
+        for zoom in [0.3_f32, 1.0, 2.0, 4.0] {
+            let (texture, pw, ph) = text_preview_texture(&ctx, &td, zoom).expect("a preview");
+            assert_eq!((pw, ph), (w, h));
+            let [tw, th] = texture.size();
+            let (sx, sy) = (tw as f32 / w as f32, th as f32 / h as f32);
+            assert!(
+                (sx - sy).abs() <= 0.1 * sx.max(sy),
+                "zoom {zoom}: drawn {tw}x{th} for a {w}x{h} page"
+            );
+        }
     }
 }
 

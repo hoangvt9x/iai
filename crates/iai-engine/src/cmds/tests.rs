@@ -907,6 +907,49 @@ fn shapes_paths_and_text_become_editable_layers() {
     assert_eq!(e.code, ErrorCode::BadParams);
 }
 
+#[test]
+fn a_type_layer_is_rasterized_and_comes_back_with_undo_and_a_locked_one_is_kept() {
+    let mut t = Setup::new();
+    t.run("file.new", json!({"widthPx": 300, "heightPx": 200}));
+    let text = t.run(
+        "text.add",
+        json!({"text": "Xin chào", "x": 20, "y": 60, "sizePx": 40, "color": "#FF0000"}),
+    );
+    let kind = |t: &mut Setup| {
+        let layers = t.inspect()["layers"].clone();
+        layers
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["id"] == text["layer"])
+            .unwrap()["kind"]
+            .clone()
+    };
+    let before = t.mean(json!({"x": 0, "y": 0, "w": 300, "h": 200}));
+    t.run("layer.rasterize", json!({"layer": text["layer"]}));
+    assert_ne!(kind(&mut t), json!("text"));
+    // It looks the same.
+    assert_eq!(t.mean(json!({"x": 0, "y": 0, "w": 300, "h": 200})), before);
+    t.run("edit.undo", json!({}));
+    assert_eq!(kind(&mut t), json!("text"));
+
+    // Its words are not written over while it is locked.
+    t.run("layer.set", json!({"layer": text["layer"], "locked": true}));
+    let spec = serde_json::to_value(super::text::TypeSpec::of(&iai_doc::model::text::TextData {
+        content: "Tạm biệt".to_string(),
+        font_px: 40.0,
+        ..Default::default()
+    }))
+    .unwrap();
+    let e = t
+        .try_run(
+            "text.set",
+            json!({"layer": text["layer"], "origin": [20, 60], "type": spec}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+}
+
 /// Where a layer's pixels lie: `x, y, w, h`.
 fn bounds_of(t: &mut Setup, id: &Value) -> [i64; 4] {
     let layers = t.inspect()["layers"].clone();
@@ -2065,8 +2108,11 @@ fn a_type_spec_carries_every_style_of_a_type_layer() {
                 bold: i % 3 == 0,
                 italic: true,
                 underline: false,
+                tracking_px: (i % 4 == 1).then_some(f32::from(i) * 0.5),
+                line_height: (i % 5 == 2).then_some(1.8),
             })
             .collect(),
+        box_width: Some(420.0),
         path: Some(iai_doc::model::text::TextPath {
             points: vec![[0.0, 0.0], [100.0, 20.0], [200.0, 0.0]],
             closed: false,

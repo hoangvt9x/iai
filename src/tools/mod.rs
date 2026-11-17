@@ -1,5 +1,9 @@
 pub mod arrow;
 pub mod brush;
+#[cfg(test)]
+mod brush_audit_tests;
+#[cfg(test)]
+pub(crate) mod brush_parity;
 pub mod clone_tool;
 pub mod crop;
 pub mod dodge_burn;
@@ -11,6 +15,7 @@ pub mod hand_tool;
 pub mod lasso;
 pub mod move_tool;
 pub mod node_tool;
+pub mod paint_prefs;
 pub mod patch;
 pub mod pen;
 pub mod pencil;
@@ -403,6 +408,39 @@ impl ToolManager {
         self.active
     }
 
+    /// Apply one options-bar change to the painting tool in hand: the
+    /// Eraser keeps its own tip, the Pencil draws with the Brush's.
+    pub fn set_paint_param(&mut self, param: crate::ui::BrushParam) {
+        use crate::ui::BrushParam as P;
+        let custom = brush::PRESET_CUSTOM;
+        if self.active == ToolId::Eraser {
+            let e = &mut self.eraser;
+            match param {
+                P::Size(v) => e.size = v.clamp(1.0, brush::MAX_TIP_SIZE),
+                P::Hardness(v) => (e.hardness, e.preset_idx) = (v.clamp(0.0, 1.0), custom),
+                P::Opacity(v) => e.opacity = v.clamp(0.0, 1.0),
+                P::Flow(v) => (e.flow, e.preset_idx) = (v.clamp(0.0, 1.0), custom),
+                P::Spacing(v) => (e.spacing, e.preset_idx) = (v.clamp(0.01, 2.0), custom),
+                P::Smoothing(v) => e.smoothing = v.clamp(0.0, 1.0),
+                // The Eraser has no paint mode nor airbrush of its own.
+                P::Mode(_) | P::Airbrush(_) => {}
+            }
+            return;
+        }
+        let b = &mut self.brush;
+        let s = &mut b.settings;
+        match param {
+            P::Size(v) => s.size = v.clamp(1.0, brush::MAX_TIP_SIZE),
+            P::Hardness(v) => (s.hardness, b.preset_idx) = (v.clamp(0.0, 1.0), custom),
+            P::Opacity(v) => s.opacity = v.clamp(0.0, 1.0),
+            P::Flow(v) => (s.flow, b.preset_idx) = (v.clamp(0.0, 1.0), custom),
+            P::Spacing(v) => (s.spacing, b.preset_idx) = (v.clamp(0.01, 2.0), custom),
+            P::Smoothing(v) => s.smoothing = v.clamp(0.0, 1.0),
+            P::Mode(m) => s.mode = m,
+            P::Airbrush(on) => b.airbrush = on,
+        }
+    }
+
     pub fn cursor_size(&self) -> f32 {
         // See `pencil_follows_brush`.
         if self.active == ToolId::Pencil {
@@ -416,8 +454,12 @@ impl ToolManager {
     fn pencil_follows_brush(&mut self) {
         if self.active == ToolId::Pencil {
             let brush = &self.brush.settings;
-            (self.pencil.size, self.pencil.opacity, self.pencil.color) =
-                (brush.size, brush.opacity, brush.color);
+            (
+                self.pencil.size,
+                self.pencil.opacity,
+                self.pencil.color,
+                self.pencil.mode,
+            ) = (brush.size, brush.opacity, brush.color, brush.mode);
         }
     }
 
@@ -427,7 +469,18 @@ impl ToolManager {
     pub fn cursor_ring_radius(&self, normal_tip: bool) -> f32 {
         let r = self.cursor_size();
         match self.tool_dyn(self.active).tip_hardness() {
-            Some(h) if normal_tip => r * brush::soft_round_half_radius(h),
+            // Brush, Eraser, Dodge and Burn paint Photoshop's tip; the others
+            // still the old one, whose 50 % contour sits a little further in.
+            Some(h)
+                if normal_tip
+                    && matches!(
+                        self.active,
+                        ToolId::Brush | ToolId::Eraser | ToolId::Dodge | ToolId::Burn
+                    ) =>
+            {
+                r * brush::soft_round_half_radius(h)
+            }
+            Some(h) if normal_tip => r * brush::legacy_half_radius(h),
             _ => r,
         }
     }
@@ -745,6 +798,12 @@ mod tests {
         assert_eq!(tools.cursor_ring_radius(false), 50.0);
         tools.clone_like_mut().hardness = 1.0;
         assert!(tools.cursor_ring_radius(true) > 49.5);
+
+        // The Brush's soft tip, Photoshop's, is at 50 % on 0.55 r.
+        tools.select(ToolId::Brush);
+        tools.brush_mut().settings.size = 100.0;
+        tools.brush_mut().settings.hardness = 0.0;
+        assert!((tools.cursor_ring_radius(true) - 27.4).abs() < 0.5);
 
         // A tool without a soft tip keeps its full ring.
         tools.select(ToolId::Pencil);

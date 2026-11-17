@@ -298,6 +298,13 @@ pub struct GlyphSpec {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    /// Space after this character, pixels; the type's own when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_px: Option<f32>,
+    /// The line height this character asks of its line (a multiple of its
+    /// size; a line takes the largest); the type's own when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<f32>,
 }
 
 /// The path a type layer is set along (see `text.fit_to_path`).
@@ -358,6 +365,12 @@ pub struct TypeSpec {
     /// Set along a path rather than in lines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathSpec>,
+    /// Paragraph type: the lines wrap at this width (pixels) and align
+    /// within it; point type (lines end only at a new-line character) when
+    /// omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1.0, max = 100000.0))]
+    pub box_width: Option<f32>,
 }
 
 impl TypeSpec {
@@ -393,8 +406,11 @@ impl TypeSpec {
                     bold: g.bold,
                     italic: g.italic,
                     underline: g.underline,
+                    tracking_px: g.tracking_px,
+                    line_height: g.line_height,
                 })
                 .collect(),
+            box_width: data.box_width,
             path: data.path.as_ref().map(|p| PathSpec {
                 points: p.points.clone(),
                 closed: p.closed,
@@ -440,8 +456,11 @@ impl TypeSpec {
                     bold: g.bold,
                     italic: g.italic,
                     underline: g.underline,
+                    tracking_px: g.tracking_px,
+                    line_height: g.line_height,
                 })
                 .collect(),
+            box_width: self.box_width.filter(|w| w.is_finite() && *w >= 1.0),
             path: self.path.as_ref().map(|p| iai_doc::model::text::TextPath {
                 points: p.points.clone(),
                 closed: p.closed,
@@ -530,6 +549,17 @@ impl Command for SetText {
                     return Err(super::common::not_enabled(
                         "that layer is not a type layer",
                         "Layer này không phải layer chữ",
+                    ));
+                }
+                let locked = canvas
+                    .layer_stack
+                    .layers
+                    .get(idx)
+                    .is_some_and(|l| l.locked && !l.is_background);
+                if locked {
+                    return Err(super::common::not_enabled(
+                        "that type layer is locked",
+                        "Layer chữ này đang khóa",
                     ));
                 }
                 Some(idx)
@@ -678,8 +708,10 @@ impl Command for FitTextToFrame {
             if (k - 1.0).abs() < 0.005 {
                 break;
             }
-            td.font_px = (td.font_px * k).clamp(1.0, 4000.0);
-            td.tracking_px *= k;
+            // Every size with the text's own: per-letter sizes and spacing,
+            // a paragraph box (its words wrap where they did).
+            let k = (td.font_px * k).clamp(1.0, 4000.0) / td.font_px.max(0.001);
+            iai_text::text::scale_letters(&mut td, k);
         }
         let label = "Fit Text To Frame";
         let mut cmd = LayerStructureCommand::capture_before(label, &canvas.layer_stack, cw, ch);

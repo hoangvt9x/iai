@@ -710,6 +710,19 @@ impl App {
                 self.win.last_cursor_radius = 0;
                 self.sync_cursor(event_loop);
             }
+            PhysicalKey::Code(code)
+                if pressed
+                    && !repeat
+                    && !self.edit.input.ctrl_held
+                    && !self.edit.input.alt_held
+                    && digit_of(code).is_some()
+                    && self.custom_command_for(physical_key).is_none()
+                    && self.paints_with_number_keys() =>
+            {
+                if let Some(d) = digit_of(code) {
+                    self.digit_paint_amount(d);
+                }
+            }
             PhysicalKey::Code(KeyCode::ArrowUp)
                 if pressed && self.docs.active().canvas.selection.active =>
             {
@@ -962,7 +975,96 @@ pub(in crate::app) fn key_name(code: KeyCode) -> Option<KeyName> {
     })
 }
 
+/// The number a digit key (main row or keypad) stands for.
+fn digit_of(code: KeyCode) -> Option<u8> {
+    Some(match code {
+        KeyCode::Digit0 | KeyCode::Numpad0 => 0,
+        KeyCode::Digit1 | KeyCode::Numpad1 => 1,
+        KeyCode::Digit2 | KeyCode::Numpad2 => 2,
+        KeyCode::Digit3 | KeyCode::Numpad3 => 3,
+        KeyCode::Digit4 | KeyCode::Numpad4 => 4,
+        KeyCode::Digit5 | KeyCode::Numpad5 => 5,
+        KeyCode::Digit6 | KeyCode::Numpad6 => 6,
+        KeyCode::Digit7 | KeyCode::Numpad7 => 7,
+        KeyCode::Digit8 | KeyCode::Numpad8 => 8,
+        KeyCode::Digit9 | KeyCode::Numpad9 => 9,
+        _ => return None,
+    })
+}
+
 impl App {
+    /// Whether the number keys set the paint amount of the tool in hand.
+    fn paints_with_number_keys(&self) -> bool {
+        self.edit.transform_state.is_none()
+            && !self.edit.show_refine_panel
+            && matches!(
+                self.edit.tools.active_id(),
+                ToolId::Brush
+                    | ToolId::Pencil
+                    | ToolId::Eraser
+                    | ToolId::Clone
+                    | ToolId::Repair
+                    | ToolId::Dodge
+                    | ToolId::Burn
+            )
+    }
+
+    /// Photoshop's number keys on a painting tool: `1`–`9` set Opacity to
+    /// 10–90 % and `0` to 100 %; two digits typed quickly set an exact value
+    /// (`4` `5` → 45 %, `0` `5` → 5 %). With Shift they set Flow (Brush,
+    /// Eraser), and with the Brush's airbrush on the two swap. On Dodge and
+    /// Burn they set Exposure.
+    pub(in crate::app) fn digit_paint_amount(&mut self, digit: u8) {
+        const QUICK: std::time::Duration = std::time::Duration::from_millis(700);
+        let shift = self.edit.input.shift_held;
+        let now = std::time::Instant::now();
+        let percent = match self.edit.input.digit_entry.take() {
+            Some((first, was_shift, at)) if was_shift == shift && now - at < QUICK => {
+                u32::from(first) * 10 + u32::from(digit)
+            }
+            _ => {
+                self.edit.input.digit_entry = Some((digit, shift, now));
+                if digit == 0 {
+                    100
+                } else {
+                    u32::from(digit) * 10
+                }
+            }
+        };
+        let v = percent.clamp(1, 100) as f32 / 100.0;
+        use crate::ui::BrushParam as P;
+        let tool = self.edit.tools.active_id();
+        let airbrush = tool == ToolId::Brush && self.edit.tools.brush().airbrush;
+        let flow = shift != airbrush;
+        let label = match tool {
+            ToolId::Clone | ToolId::Repair => {
+                if shift {
+                    return;
+                }
+                self.edit.tools.clone_like_mut().opacity = v;
+                "Opacity"
+            }
+            ToolId::Dodge | ToolId::Burn => {
+                if shift {
+                    return;
+                }
+                self.edit.tools.dodge_burn_mut().exposure = v;
+                "Exposure"
+            }
+            ToolId::Pencil if flow => return,
+            _ if flow => {
+                self.edit.tools.set_paint_param(P::Flow(v));
+                "Flow"
+            }
+            _ => {
+                self.edit.tools.set_paint_param(P::Opacity(v));
+                "Opacity"
+            }
+        };
+        self.shell.status_msg = format!("{label} {}%", percent.clamp(1, 100));
+        self.redraw_main();
+    }
+
     /// `[` / `]`: resize the tip of the tool in hand.
     fn bracket_tip_size(&mut self, grow: bool) {
         let moved = |size: f32, step: f32, max: f32| {
@@ -973,17 +1075,17 @@ impl App {
             }
         };
         let stepped = |size: f32, max: f32| moved(size, clone_bracket_step(size, grow), max);
-        let nudged = |size: f32, max: f32| moved(size, 2.0, max);
         let tools = &mut self.edit.tools;
         if self.edit.show_refine_panel {
             let tool = tools.refine_brush_mut();
             tool.size = stepped(tool.size, 1000.0);
             return;
         }
+        let max_tip = crate::tools::brush::MAX_TIP_SIZE;
         match tools.active_id() {
             ToolId::Eraser => {
                 let tool = tools.eraser_mut();
-                tool.size = nudged(tool.size, 5000.0);
+                tool.size = stepped(tool.size, max_tip);
             }
             ToolId::Clone | ToolId::Repair => {
                 let tool = tools.clone_like_mut();
@@ -1003,7 +1105,7 @@ impl App {
             }
             _ => {
                 let settings = &mut tools.brush_mut().settings;
-                settings.size = nudged(settings.size, 300.0);
+                settings.size = stepped(settings.size, max_tip);
             }
         }
     }
@@ -1019,9 +1121,11 @@ impl App {
             return;
         }
         match tools.active_id() {
+            // Photoshop steps hardness by a quarter.
             ToolId::Eraser => {
                 let tool = tools.eraser_mut();
-                tool.hardness = moved(tool.hardness, 0.1);
+                tool.hardness = moved(tool.hardness, 0.25);
+                tool.preset_idx = crate::tools::brush::PRESET_CUSTOM;
             }
             ToolId::Clone | ToolId::Repair => {
                 let tool = tools.clone_like_mut();
@@ -1038,8 +1142,9 @@ impl App {
             // The Quick Selection brush has no hardness.
             ToolId::SmartSelect => {}
             _ => {
-                let settings = &mut tools.brush_mut().settings;
-                settings.hardness = moved(settings.hardness, 0.1);
+                let brush = tools.brush_mut();
+                brush.settings.hardness = moved(brush.settings.hardness, 0.25);
+                brush.preset_idx = crate::tools::brush::PRESET_CUSTOM;
             }
         }
     }
@@ -1877,13 +1982,59 @@ mod tests {
         let after = &app.edit.tools.brush().settings;
         assert_eq!((after.size, after.hardness), brush);
 
-        // The Brush itself, and a size past the keys' ceiling only comes down.
+        // The Brush itself steps like Photoshop's: coarser as it grows, and
+        // `]` on a big tip grows it (it used to drop to 300 px).
         app.edit.tools.select(ToolId::Brush);
         app.bracket_tip_size(true);
-        assert_eq!(app.edit.tools.brush().settings.size, brush.0 + 2.0);
+        assert_eq!(app.edit.tools.brush().settings.size, brush.0 + 5.0);
         app.edit.tools.brush_mut().settings.size = 800.0;
+        app.bracket_tip_size(true);
+        assert_eq!(app.edit.tools.brush().settings.size, 850.0);
         app.bracket_tip_size(false);
-        assert_eq!(app.edit.tools.brush().settings.size, 798.0);
+        assert_eq!(app.edit.tools.brush().settings.size, 800.0);
+        app.edit.tools.brush_mut().settings.size = 4990.0;
+        app.bracket_tip_size(true);
+        assert_eq!(app.edit.tools.brush().settings.size, 5000.0);
+        app.bracket_tip_hardness(false);
+        assert_eq!(app.edit.tools.brush().settings.hardness, brush.1 - 0.25);
+
+        // The Eraser keeps its own tip, stepped the same way.
+        app.edit.tools.select(ToolId::Eraser);
+        app.edit.tools.eraser_mut().size = 120.0;
+        app.bracket_tip_size(true);
+        assert_eq!(app.edit.tools.eraser().size, 130.0);
+    }
+
+    #[test]
+    fn number_keys_set_the_paint_amount_like_photoshop() {
+        let mut app = App::new();
+        app.edit.tools.select(ToolId::Brush);
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        app.digit_paint_amount(5);
+        assert!(near(app.edit.tools.brush().settings.opacity, 0.5));
+        // A second digit typed quickly makes an exact value.
+        app.digit_paint_amount(7);
+        assert!(near(app.edit.tools.brush().settings.opacity, 0.57));
+        app.edit.input.digit_entry = None;
+        app.digit_paint_amount(0);
+        assert!(near(app.edit.tools.brush().settings.opacity, 1.0));
+        // Shift: Flow.
+        app.edit.input.digit_entry = None;
+        app.edit.input.shift_held = true;
+        app.digit_paint_amount(3);
+        assert!(near(app.edit.tools.brush().settings.flow, 0.3));
+        // The airbrush swaps the two.
+        app.edit.tools.brush_mut().airbrush = true;
+        app.edit.input.digit_entry = None;
+        app.digit_paint_amount(4);
+        assert!(near(app.edit.tools.brush().settings.opacity, 0.4));
+        // The Eraser keeps its own.
+        app.edit.input.shift_held = false;
+        app.edit.input.digit_entry = None;
+        app.edit.tools.select(ToolId::Eraser);
+        app.digit_paint_amount(2);
+        assert!(near(app.edit.tools.eraser().opacity, 0.2));
+        assert!(near(app.edit.tools.brush().settings.opacity, 0.4));
     }
 
     #[test]
@@ -1899,7 +2050,7 @@ mod tests {
         assert_eq!(app.edit.tools.cursor_size(), 20.0);
         // The keys resize what the Pencil draws with.
         app.bracket_tip_size(true);
-        assert_eq!(app.edit.tools.cursor_size(), 21.0);
+        assert_eq!(app.edit.tools.cursor_size(), 22.5);
         {
             let (fg, bg) = ([200, 30, 30, 255], [255; 4]);
             let mut ctx = ToolCtx::new(&mut app.docs.documents[0], fg, bg, 1.0, 0.0, 0.0);
