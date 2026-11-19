@@ -1,10 +1,14 @@
 // Document tab bar — shown between the menu bar and the tool-options bar.
 // One tab per open document; clicking switches the active document.
 //
-// The strip always starts at the first tab and shows as many as fit; the
-// rest are listed, in order, under the ▾ button at the right. The tab being
-// worked on is always on the strip: when it is one of those that do not fit,
-// it takes the strip's last place (and is not listed).
+// When the tabs do not all fit, the strip is a window on them that slides:
+// it shows a run of neighbouring tabs, in order, and remembers where it was.
+// When the tab worked on is outside it (a document just opened, one picked
+// from the list), the strip slides just far enough to bring it in — the old
+// tabs on the left make room for the new ones on the right. Switching between
+// tabs already on the strip does not move it. The mouse wheel over the strip
+// slides it by hand. The tabs off either end are listed, in order, under the
+// ▾ button at the right.
 
 use super::{UiActions, UiData};
 use egui;
@@ -24,6 +28,8 @@ const DOC_LIST_MIN_W: f32 = 260.0;
 const DOC_LIST_MAX_W: f32 = 360.0;
 const PREVIEW_MAX_W: f32 = 160.0;
 const PREVIEW_MAX_H: f32 = 120.0;
+/// Wheel travel (points) that slides the strip by one tab.
+const WHEEL_STEP: f32 = 40.0;
 
 /// Which tabs the strip shows, left to right, and which the ▾ list holds.
 #[derive(Debug, PartialEq)]
@@ -32,52 +38,106 @@ struct StripPlan {
     hidden: Vec<usize>,
 }
 
-/// The strip's tabs from the first, as many as fit in `room`; the tab
-/// `active` is always among them (in the last place when it would not fit in
-/// its own); the others, in order, go to the list.
-fn plan_strip(widths: &[f32], active: usize, room: f32) -> StripPlan {
-    let n = widths.len();
-    let mut fit = 0;
+/// What the strip remembers from one frame to the next.
+#[derive(Clone, Copy, Default)]
+struct StripMemory {
+    /// The first tab on the strip.
+    first: usize,
+    /// The tab worked on and the number of tabs the last time the strip
+    /// made sure the tab worked on was shown: only a change of either brings
+    /// it back in, so the wheel can slide away from it.
+    active: usize,
+    count: usize,
+    /// Wheel travel not yet turned into a slide.
+    wheel: f32,
+}
+
+/// The tabs from `first` that fit in `room` (at least one), as an end index.
+fn fit_from(widths: &[f32], first: usize, room: f32) -> usize {
+    let mut end = first;
     let mut used = 0.0;
-    while let Some(&w) = widths.get(fit) {
-        if used + w > room + 0.5 {
+    while let Some(&w) = widths.get(end) {
+        if end > first && used + w > room + 0.5 {
             break;
         }
         used += w;
-        fit += 1;
+        end += 1;
     }
-    let Some(&active_w) = widths.get(active).filter(|_| active >= fit) else {
-        return StripPlan {
-            shown: (0..fit).collect(),
-            hidden: (fit..n).collect(),
-        };
-    };
-    // The tab worked on does not fit in its own place: it takes the last.
-    let mut keep = 0;
-    let mut used = active_w;
-    while let Some(&w) = widths.get(keep).filter(|_| keep < active) {
-        if used + w > room + 0.5 {
-            break;
+    end
+}
+
+/// The strip as a window from `first`: when `reveal` is given, the window
+/// slides the least it can to show that tab; a window that ends at the last
+/// tab with room to spare slides back to fill it. Returns the plan and the
+/// first tab shown.
+fn plan_window(
+    widths: &[f32],
+    first: usize,
+    reveal: Option<usize>,
+    room: f32,
+) -> (StripPlan, usize) {
+    let n = widths.len();
+    if n == 0 {
+        return (
+            StripPlan {
+                shown: Vec::new(),
+                hidden: Vec::new(),
+            },
+            0,
+        );
+    }
+    let mut first = first.min(n - 1);
+    if let Some(t) = reveal.filter(|&t| t < n) {
+        if t < first {
+            first = t;
+        } else if t >= fit_from(widths, first, room) {
+            // Slide right until `t` is the last tab that fits.
+            first = t;
+            let mut used = widths.get(t).copied().unwrap_or(0.0);
+            while let Some(&w) = first.checked_sub(1).and_then(|i| widths.get(i)) {
+                if used + w > room + 0.5 {
+                    break;
+                }
+                used += w;
+                first -= 1;
+            }
         }
-        used += w;
-        keep += 1;
     }
-    let mut shown: Vec<usize> = (0..keep).collect();
-    shown.push(active);
-    StripPlan {
-        shown,
-        hidden: (keep..n).filter(|&i| i != active).collect(),
+    // Room left after the last tab: bring earlier tabs back in.
+    let mut end = fit_from(widths, first, room);
+    if end == n {
+        let mut used: f32 = widths.get(first..n).map_or(0.0, |w| w.iter().sum());
+        while let Some(&w) = first.checked_sub(1).and_then(|i| widths.get(i)) {
+            if used + w > room + 0.5 {
+                break;
+            }
+            used += w;
+            first -= 1;
+        }
+        end = n;
     }
+    (
+        StripPlan {
+            shown: (first..end).collect(),
+            hidden: (0..first).chain(end..n).collect(),
+        },
+        first,
+    )
 }
 
 /// The strip in `width` points: the tabs, the new-tab button after them, and
 /// the ▾ button at the right when some tabs are listed.
-fn plan_for_width(widths: &[f32], active: usize, width: f32) -> StripPlan {
-    let all = plan_strip(widths, active, width - NEW_BTN_W);
-    if all.hidden.is_empty() {
+fn plan_for_width(
+    widths: &[f32],
+    first: usize,
+    reveal: Option<usize>,
+    width: f32,
+) -> (StripPlan, usize) {
+    let all = plan_window(widths, first, reveal, width - NEW_BTN_W);
+    if all.0.hidden.is_empty() {
         return all;
     }
-    plan_strip(widths, active, width - NEW_BTN_W - DOC_LIST_ROOM)
+    plan_window(widths, first, reveal, width - NEW_BTN_W - DOC_LIST_ROOM)
 }
 
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
@@ -117,7 +177,38 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.spacing_mut().button_padding = egui::vec2(0.0, 0.0);
                     let widths: Vec<f32> = (0..doc_count).map(|i| tab_width(data, i)).collect();
-                    let plan = plan_for_width(&widths, active, ui.available_width());
+                    let memory_id = ui.id().with("tab_strip_window");
+                    let mut memory: StripMemory =
+                        ctx.data(|d| d.get_temp(memory_id)).unwrap_or_default();
+                    // The wheel over the strip slides it, one tab a step.
+                    if ui.rect_contains_pointer(ui.max_rect()) {
+                        let delta = ctx.input(|i| i.smooth_scroll_delta);
+                        let d = if delta.x.abs() > delta.y.abs() {
+                            delta.x
+                        } else {
+                            delta.y
+                        };
+                        memory.wheel += d;
+                    } else {
+                        memory.wheel = 0.0;
+                    }
+                    let mut first = memory.first;
+                    while memory.wheel >= WHEEL_STEP {
+                        memory.wheel -= WHEEL_STEP;
+                        first = first.saturating_sub(1);
+                    }
+                    while memory.wheel <= -WHEEL_STEP {
+                        memory.wheel += WHEEL_STEP;
+                        first += 1;
+                    }
+                    let reveal =
+                        (memory.active != active || memory.count != doc_count).then_some(active);
+                    let (plan, first) =
+                        plan_for_width(&widths, first, reveal, ui.available_width());
+                    memory.first = first;
+                    memory.active = active;
+                    memory.count = doc_count;
+                    ctx.data_mut(|d| d.insert_temp(memory_id, memory));
 
                     // The ▾ list sits at the right edge, the tabs from the left.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -398,8 +489,7 @@ fn build_document_list(
     hidden: &[usize],
 ) {
     let pal = data.chrome.theme_mode.palette();
-    // Only the tabs after the strip's, in order (the tab worked on is always
-    // on the strip, so it is never listed).
+    // The tabs off either end of the strip, in order.
     if hidden.is_empty() {
         return;
     }
@@ -493,7 +583,7 @@ fn truncate_title(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{StripPlan, plan_strip};
+    use super::{StripPlan, plan_window};
 
     fn plan(shown: &[usize], hidden: &[usize]) -> StripPlan {
         StripPlan {
@@ -503,15 +593,17 @@ mod tests {
     }
 
     #[test]
-    fn the_strip_starts_at_the_first_tab_and_lists_the_rest_in_order() {
+    fn everything_that_fits_is_shown() {
         let widths = [100.0; 6];
-        // Everything fits: nothing listed.
         assert_eq!(
-            plan_strip(&widths, 2, 600.0),
+            plan_window(&widths, 0, Some(2), 600.0).0,
             plan(&[0, 1, 2, 3, 4, 5], &[])
         );
-        // Three fit: the next ones, in order, are listed.
-        assert_eq!(plan_strip(&widths, 1, 320.0), plan(&[0, 1, 2], &[3, 4, 5]));
+        // Three fit, the strip at the start: the rest are listed.
+        assert_eq!(
+            plan_window(&widths, 0, Some(1), 320.0).0,
+            plan(&[0, 1, 2], &[3, 4, 5])
+        );
     }
 
     /// The strip drawn to a picture, to look at (not a check):
@@ -548,13 +640,39 @@ mod tests {
     }
 
     #[test]
-    fn the_tab_worked_on_takes_the_last_place_when_it_does_not_fit() {
+    fn a_tab_off_the_strip_slides_it_the_least_and_old_tabs_make_room() {
         let widths = [100.0; 6];
-        // The last opened (and shown): the first two, then it.
-        assert_eq!(plan_strip(&widths, 5, 320.0), plan(&[0, 1, 5], &[2, 3, 4]));
-        // One from the middle of the list.
-        assert_eq!(plan_strip(&widths, 3, 320.0), plan(&[0, 1, 3], &[2, 4, 5]));
+        // The last opened: the strip slides right, the first tabs go.
+        assert_eq!(
+            plan_window(&widths, 0, Some(5), 320.0),
+            (plan(&[3, 4, 5], &[0, 1, 2]), 3)
+        );
+        // Back to a tab on the left: it becomes the first.
+        assert_eq!(
+            plan_window(&widths, 3, Some(1), 320.0),
+            (plan(&[1, 2, 3], &[0, 4, 5]), 1)
+        );
         // No room even for it: it is still shown, alone.
-        assert_eq!(plan_strip(&widths, 4, 50.0), plan(&[4], &[0, 1, 2, 3, 5]));
+        assert_eq!(plan_window(&widths, 0, Some(4), 50.0).0.shown, vec![4]);
+    }
+
+    #[test]
+    fn switching_between_tabs_on_the_strip_does_not_move_it() {
+        let widths = [100.0; 6];
+        for t in 3..6 {
+            assert_eq!(plan_window(&widths, 3, Some(t), 320.0).1, 3);
+        }
+    }
+
+    #[test]
+    fn a_strip_with_room_left_at_the_end_slides_back() {
+        // Two tabs closed: the window at 4 would leave room, so it fills.
+        let widths = [100.0; 5];
+        assert_eq!(
+            plan_window(&widths, 4, None, 320.0),
+            (plan(&[2, 3, 4], &[0, 1]), 2)
+        );
+        // The wheel past the end stops at the last full window.
+        assert_eq!(plan_window(&widths, 9, None, 320.0).1, 2);
     }
 }

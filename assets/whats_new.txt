@@ -2,6 +2,10 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+19/11/2026
+- Mở nhiều ảnh mà thanh tab không đủ chỗ: các tab cũ tự dời sang trái nhường chỗ cho ảnh mới mở, ảnh đang làm luôn hiện trên thanh. Chuyển qua lại giữa các tab đang thấy thì thanh đứng yên, không còn tab nào bị giấu vào nút mũi tên.
+- Lăn chuột trên thanh tab để kéo thanh qua trái / phải xem các tab khác. Nút mũi tên bên phải vẫn liệt kê mọi tab không hiện trên thanh.
+
 17/11/2026
 - Cọ (Brush) và Tẩy (Eraser) nay vẽ giống Photoshop: cọ mềm tỏa mềm ra quá mép vòng tròn như Photoshop (trước đây tắt hẳn ở mép nên nét mảnh và nhạt hơn), cọ cứng có mép mịn, các mức độ cứng ra đúng như Photoshop. Đã đặt từng nét cạnh nét của Photoshop để so: gần như trùng khít.
 - Phím [ ] đổi cỡ cọ như Photoshop, cọ càng to bước càng lớn (cọ to bấm ] không còn bị tụt về 300 px); Shift+[ ] đổi độ cứng mỗi lần một phần tư. Cọ to nhất đủ 5000 px.
