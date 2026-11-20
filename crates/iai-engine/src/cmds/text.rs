@@ -371,6 +371,11 @@ pub struct TypeSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1.0, max = 100000.0))]
     pub box_width: Option<f32>,
+    /// Paragraph type's box height (pixels): lines that do not fit are not
+    /// drawn; the box grows with its lines when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1.0, max = 100000.0))]
+    pub box_height: Option<f32>,
 }
 
 impl TypeSpec {
@@ -411,6 +416,7 @@ impl TypeSpec {
                 })
                 .collect(),
             box_width: data.box_width,
+            box_height: data.box_height,
             path: data.path.as_ref().map(|p| PathSpec {
                 points: p.points.clone(),
                 closed: p.closed,
@@ -461,6 +467,9 @@ impl TypeSpec {
                 })
                 .collect(),
             box_width: self.box_width.filter(|w| w.is_finite() && *w >= 1.0),
+            box_height: self
+                .box_height
+                .filter(|h| h.is_finite() && *h >= 1.0 && self.box_width.is_some()),
             path: self.path.as_ref().map(|p| iai_doc::model::text::TextPath {
                 points: p.points.clone(),
                 closed: p.closed,
@@ -741,6 +750,120 @@ impl Command for FitTextToFrame {
         };
         s.emit(EngineEvent::Structure { doc });
         s.notice("Co chữ vừa khung".to_string(), label.to_string());
+        Ok(Plan::Done(out))
+    }
+}
+
+// ---- text.convert ----------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum TypeKind {
+    /// Lines end only where a new-line character is.
+    Point,
+    /// The lines wrap in a box.
+    Paragraph,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ConvertTypeParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// The type layer; the active one when omitted.
+    pub layer: Option<u32>,
+    /// What it becomes.
+    pub to: TypeKind,
+}
+
+impl Validate for ConvertTypeParams {}
+
+static CONVERT_TYPE: CommandMeta = CommandMeta {
+    id: "text.convert",
+    label_vi: "Đổi chữ điểm / chữ khung",
+    label_en: "Convert Point / Paragraph Text",
+    doc: "Turn a type layer into point type (`to: point`: the box goes and each line ends \
+          where it ended in it, with a new line) or paragraph type (`to: paragraph`: a box as \
+          wide as its widest line). No line moves. One undo step.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct ConvertType;
+
+impl Command for ConvertType {
+    type Params = ConvertTypeParams;
+    type Output = TextAdded;
+    fn meta(&self) -> &'static CommandMeta {
+        &CONVERT_TYPE
+    }
+    fn plan(&self, s: &mut Session<'_>, p: ConvertTypeParams) -> Result<Plan<TextAdded>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        let (cw, ch) = (canvas.width, canvas.height);
+        let idx = layer_index(canvas, p.layer)?;
+        let (td, offset) = match canvas.layer_stack.layers.get(idx) {
+            Some(l) => match &l.layer_type {
+                iai_doc::layer::LayerType::Text(td) => (td.clone(), l.offset),
+                _ => {
+                    return Err(super::common::not_enabled(
+                        "that layer is not a type layer",
+                        "Layer này không phải layer chữ",
+                    ));
+                }
+            },
+            None => return Err(CmdError::internal("layer")),
+        };
+        let converted = match p.to {
+            TypeKind::Point => iai_text::text::to_point_type(&td),
+            TypeKind::Paragraph => iai_text::text::to_paragraph_type(&td),
+        };
+        let Some(converted) = converted else {
+            return Err(super::common::not_enabled(
+                "the layer is that kind of type already, or set along a path",
+                "Layer chữ đã là kiểu đó rồi, hoặc là chữ chạy theo đường",
+            ));
+        };
+        let delta = iai_text::text::rasterize_placed(&td).map_or((0, 0), |(_, d)| d);
+        let anchor = (
+            offset.0.saturating_sub(delta.0),
+            offset.1.saturating_sub(delta.1),
+        );
+        let label = match p.to {
+            TypeKind::Point => "Convert to Point Text",
+            TypeKind::Paragraph => "Convert to Paragraph Text",
+        };
+        let mut cmd = LayerStructureCommand::capture_before(label, &canvas.layer_stack, cw, ch);
+        canvas.layer_stack.active_idx = idx;
+        rasterize_into_layer(canvas, idx, anchor, converted);
+        cmd.capture_after(&canvas.layer_stack, cw, ch);
+        canvas.record(Box::new(cmd));
+        canvas.layer_revision = canvas.layer_revision.saturating_add(1);
+        canvas.flatten_full();
+        let layer = canvas
+            .layer_stack
+            .layers
+            .get(idx)
+            .ok_or_else(|| CmdError::internal("type layer"))?;
+        let out = TextAdded {
+            doc,
+            layer: layer.id,
+            bounds: Bounds {
+                x: layer.offset.0,
+                y: layer.offset.1,
+                w: layer.width,
+                h: layer.height,
+            },
+            font_found: None,
+            face_used: None,
+            vietnamese: None,
+        };
+        s.emit(EngineEvent::Structure { doc });
+        let vi = match p.to {
+            TypeKind::Point => "Đã đổi thành chữ điểm",
+            TypeKind::Paragraph => "Đã đổi thành chữ khung",
+        };
+        s.notice(vi.to_string(), label.to_string());
         Ok(Plan::Done(out))
     }
 }

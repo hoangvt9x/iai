@@ -497,9 +497,9 @@ impl CloneTool {
                         let src_b = (sb as f32 / 255.0 + cb).clamp(0.0, 1.0);
                         if let Some(conv) = cmyk_conv.as_ref() {
                             let fink = conv.rgb_to_cmyk_one([
-                                (src_r * 255.0).round() as u8,
-                                (src_g * 255.0).round() as u8,
-                                (src_b * 255.0).round() as u8,
+                                crate::core::fast_math::round_u8(src_r * 255.0),
+                                crate::core::fast_math::round_u8(src_g * 255.0),
+                                crate::core::fast_math::round_u8(src_b * 255.0),
                             ]);
                             let dw = dst_a * (1.0 - src_alpha);
                             let plane = dst_tile.ink.as_mut().expect("cmyk tile carries ink");
@@ -518,7 +518,7 @@ impl CloneTool {
                                 } else {
                                     (s * src_alpha + d * dw) / out_a
                                 };
-                                let v = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                                let v = crate::core::fast_math::round_u8(v * 255.0);
                                 plane[i + c] = v;
                                 ink[c] = v;
                             }
@@ -530,7 +530,7 @@ impl CloneTool {
                             // updates it with the source-over result.
                             if channel_wm.is_none() {
                                 dst_tile.pixels[i + 3] =
-                                    (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+                                    crate::core::fast_math::round_u8(out_a * 255.0);
                             }
                             continue;
                         }
@@ -554,7 +554,7 @@ impl CloneTool {
                         }
                         // .round(): truncation drifts every overlapping dab
                         // toward black / transparent (dark blotches).
-                        let to8 = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                        let to8 = |v: f32| crate::core::fast_math::round_u8(v * 255.0);
                         dst_tile.pixels[i] = to8((src_r * src_alpha + dst_r * dst_a * inv) / denom);
                         dst_tile.pixels[i + 1] =
                             to8((src_g * src_alpha + dst_g * dst_a * inv) / denom);
@@ -593,9 +593,12 @@ impl CloneTool {
     /// mask receives the source's gray value.
     fn stamp_dab_stroked(&mut self, canvas: &mut Canvas, dst_cx: f32, dst_cy: f32) {
         let r = self.radius().min(2500.0);
-        let r2 = r * r;
+        // Photoshop's measured round tip, as the Brush paints (16/11): a soft
+        // tip's bell runs past the radius, to its reach (20/11).
+        let tip = super::brush::RoundTip::new(r, self.hardness);
+        let reach = tip.reach();
+        let r2 = reach * reach;
         let opacity = self.opacity.clamp(0.0, 1.0);
-        let hardness = self.hardness;
         let (off_x, off_y) = (self.offset_x, self.offset_y);
         let merged = self.stroke_source_merged;
         let (Some(stroke), Some(src)) = (self.stroke.as_mut(), self.stroke_source.as_ref()) else {
@@ -617,10 +620,10 @@ impl CloneTool {
 
         let lcx = dst_cx - ox as f32;
         let lcy = dst_cy - oy as f32;
-        let lx0 = ((lcx - r).floor().max(0.0) as u32).min(lw);
-        let ly0 = ((lcy - r).floor().max(0.0) as u32).min(lh);
-        let lx1 = ((lcx + r).ceil().max(0.0) as u32).min(lw);
-        let ly1 = ((lcy + r).ceil().max(0.0) as u32).min(lh);
+        let lx0 = ((lcx - reach).floor().max(0.0) as u32).min(lw);
+        let ly0 = ((lcy - reach).floor().max(0.0) as u32).min(lh);
+        let lx1 = ((lcx + reach).ceil().max(0.0) as u32).min(lw);
+        let ly1 = ((lcy + reach).ceil().max(0.0) as u32).min(lh);
         if lx1 <= lx0 || ly1 <= ly0 {
             return;
         }
@@ -632,7 +635,7 @@ impl CloneTool {
         };
         let ts = crate::core::tile::TILE_SIZE;
         let tile_px = (ts * ts) as usize;
-        let to8 = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        let to8 = |v: f32| crate::core::fast_math::round_u8(v * 255.0);
 
         for ty in (ly0 / ts)..=((ly1 - 1) / ts) {
             for tx in (lx0 / ts)..=((lx1 - 1) / ts) {
@@ -667,7 +670,7 @@ impl CloneTool {
                             continue;
                         }
                         let canvas_x = px as i32 + ox;
-                        let mut a = soft_round_alpha(d2, r, hardness);
+                        let mut a = tip.alpha(d2);
                         if has_sel {
                             if canvas_x < 0 || canvas_y < 0 {
                                 continue;

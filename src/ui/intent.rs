@@ -1135,4 +1135,10 @@ pub enum TextFrameAsk {
     Move((i32, i32)),
     /// Its paragraph box this wide, canvas pixels before the stretch.
     BoxWidth(f32),
+    /// Its paragraph box this tall, canvas pixels: lines past it are hidden.
+    BoxHeight(f32),
+    /// Photoshop's kerning: the space between the letters either side of
+    /// the caret (`at`, in letters) widened by `delta` px (Alt+←/→ with
+    /// nothing selected).
+    Kern { at: usize, delta: f32 },
 }

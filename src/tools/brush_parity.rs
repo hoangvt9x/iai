@@ -482,7 +482,7 @@ mod tests {
             let t = std::time::Instant::now();
             let iai = paint(&case);
             let ms = t.elapsed().as_secs_f64() * 1e3;
-            let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let to8 = |v: f32| crate::core::fast_math::round_u8(v.clamp(0.0, 1.0) * 255.0);
             write_png(
                 &out.join(format!("{}.png", case.id)),
                 case.w,

@@ -2113,6 +2113,7 @@ fn a_type_spec_carries_every_style_of_a_type_layer() {
             })
             .collect(),
         box_width: Some(420.0),
+        box_height: Some(260.0),
         path: Some(iai_doc::model::text::TextPath {
             points: vec![[0.0, 0.0], [100.0, 20.0], [200.0, 0.0]],
             closed: false,
@@ -2404,4 +2405,25 @@ fn a_fonts_kind_is_told_by_its_name() {
     assert_eq!(font_class("Segoe Script"), FontClass::Script);
     assert_eq!(font_class("Impact"), FontClass::Display);
     assert_eq!(font_class("Arial"), FontClass::Sans);
+}
+
+#[test]
+fn type_turns_paragraph_and_back_without_moving() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 400, "heightPx": 200, "background": "#FFFFFF"}),
+    );
+    let made = t.run(
+        "text.add",
+        json!({"text": "MAM NON\nHOA SEN", "x": 10, "y": 10, "sizePx": 20}),
+    );
+    let layer = made["layer"].as_u64().unwrap();
+    let para = t.run("text.convert", json!({"layer": layer, "to": "paragraph"}));
+    assert_eq!(para["bounds"], made["bounds"]);
+    let point = t.run("text.convert", json!({"layer": layer, "to": "point"}));
+    assert_eq!(point["bounds"], made["bounds"]);
+    // Point type already: nothing to do.
+    let again = t.try_run("text.convert", json!({"layer": layer, "to": "point"}));
+    assert!(again.is_err(), "{again:?}");
 }

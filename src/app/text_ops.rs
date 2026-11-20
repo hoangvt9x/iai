@@ -680,6 +680,7 @@ impl App {
             path: None,
             fill: None,
             box_width: None,
+            box_height: None,
         };
         // Keep glyph_styles either empty (uniform) or exactly one per char.
         if !td.glyph_styles.is_empty() {
@@ -840,6 +841,7 @@ impl App {
         td.flip_y = s.flip_y;
         td.path = s.path.clone();
         td.box_width = s.box_width;
+        td.box_height = s.box_width.and(s.box_height);
         Some(td)
     }
 
@@ -913,7 +915,7 @@ impl App {
             self.deny_modal_action();
             return;
         }
-        self.begin_new_text(cx, cy, None);
+        self.begin_new_text(cx, cy, None, None);
     }
 
     /// A paragraph box dragged out with the Type tool, corner to corner on
@@ -927,13 +929,24 @@ impl App {
         let (x0, y0) = (from.0.min(to.0), from.1.min(to.1));
         let width = (from.0 - to.0).abs();
         if width < 4.0 {
-            self.begin_new_text(from.0, from.1, None);
+            self.begin_new_text(from.0, from.1, None, None);
             return;
         }
-        self.begin_new_text(x0, y0, Some(width));
+        // A box at least a line tall keeps its height, as Photoshop's: the
+        // lines that do not fit are hidden, with a mark on the box. A flat
+        // drag gives a box that grows with its lines.
+        let height = (from.1 - to.1).abs();
+        let height = (height >= self.edit.text_font_px.max(4.0)).then_some(height);
+        self.begin_new_text(x0, y0, Some(width), height);
     }
 
-    fn begin_new_text(&mut self, cx: f32, cy: f32, box_width: Option<f32>) {
+    fn begin_new_text(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        box_width: Option<f32>,
+        box_height: Option<f32>,
+    ) {
         self.edit.text_font_preview = None;
         let (cw, ch) = {
             let d = self.docs.active();
@@ -979,6 +992,7 @@ impl App {
             // (a paragraph box's top-left corner).
             anchor: Some((cx, cy)),
             box_width,
+            box_height,
         });
         self.sync_text_anchor();
         self.edit.text_focus_pending = true;
@@ -1092,6 +1106,7 @@ impl App {
             pending_style: None,
             anchor: None,
             box_width: td.box_width,
+            box_height: td.box_height,
             orig: Some(td),
             before_cmd: Some(before),
         });
@@ -1456,6 +1471,7 @@ impl App {
         td.flip_y = session.flip_y;
         td.path = session.path.clone();
         td.box_width = session.box_width;
+        td.box_height = session.box_width.and(session.box_height);
         // A gradient across the letters is not the Type tool's: it stays.
         td.fill = session.orig.as_ref().and_then(|o| o.fill.clone());
 
@@ -1661,6 +1677,29 @@ impl App {
             w.request_redraw();
         }
     }
+}
+
+/// Widen the space after the letter before the caret by `delta` px: the
+/// letter's own tracking, from the text's when it has none (Photoshop's
+/// kerning between two letters). Nothing before the caret, nothing done.
+pub(in crate::app) fn kern_at_caret(
+    session: &mut crate::app::state::TextEditState,
+    (base, text_tracking): (crate::core::text::GlyphStyle, f32),
+    at: usize,
+    delta: f32,
+) {
+    let n = session.buffer.chars().count();
+    if at == 0 || at > n || !delta.is_finite() {
+        return;
+    }
+    if session.glyph_styles.len() != n {
+        session.glyph_styles = (0..n)
+            .map(|i| session.glyph_styles.get(i).cloned().unwrap_or(base.clone()))
+            .collect();
+    }
+    let style = &mut session.glyph_styles[at - 1];
+    let now = style.tracking_px.unwrap_or(text_tracking);
+    style.tracking_px = Some((now + delta).clamp(-200.0, 500.0));
 }
 
 #[cfg(test)]
@@ -2252,6 +2291,23 @@ mod tests {
         assert_eq!(s.glyph_styles[1].line_height, Some(2.0));
     }
 
+    /// Alt+arrows with nothing selected: the space after the letter before
+    /// the caret, from the text's own tracking (Photoshop's kerning).
+    #[test]
+    fn kerning_widens_the_space_at_the_caret() {
+        let mut app = App::new();
+        app.text_tool_click(5.0, 5.0);
+        app.update_text_buffer("abcd".to_string());
+        app.edit.text_tracking_px = 4.0;
+        let base = (app.text_kern_base_style(), app.edit.text_tracking_px);
+        let s = app.edit.text_edit.as_mut().expect("a session");
+        super::kern_at_caret(s, base.clone(), 2, 1.0);
+        super::kern_at_caret(s, base.clone(), 2, 1.0);
+        super::kern_at_caret(s, base.clone(), 0, 1.0);
+        let own: Vec<_> = s.glyph_styles.iter().map(|g| g.tracking_px).collect();
+        assert_eq!(own, vec![None, Some(6.0), None, None]);
+    }
+
     /// A drag with the Type tool makes paragraph type: a box as wide as the
     /// drag, its top-left corner where the drag began, the words wrapping in
     /// it; the box can be made another width while editing.
@@ -2262,12 +2318,14 @@ mod tests {
         app.edit.text_font_family = crate::core::text::TextFontFamily::DejaVuSans;
         app.edit.text_font_px = 30.0;
         app.edit.text_font_px_auto = false;
-        app.text_tool_box((300.0, 200.0), (100.0, 260.0));
+        // Flatter than a line: a box that grows with its lines.
+        app.text_tool_box((300.0, 200.0), (100.0, 220.0));
         if crate::core::text::font_for(&app.edit.text_font_family).is_none() {
             return; // no font here
         }
         let s = app.edit.text_edit.as_ref().expect("a session");
         assert_eq!(s.box_width, Some(200.0));
+        assert_eq!(s.box_height, None);
         app.update_text_buffer("Một hai ba bốn năm sáu bảy tám chín mười".to_string());
         app.sync_text_anchor();
         let td = app.session_text_data().expect("the type");
@@ -2283,6 +2341,16 @@ mod tests {
             &l.layer_type,
             LayerType::Text(td) if td.box_width == Some(200.0)
         )));
+
+        // A line tall or more: the box keeps that height, the rest is hidden.
+        app.text_tool_box((100.0, 400.0), (300.0, 460.0));
+        app.update_text_buffer("Một hai ba bốn năm sáu bảy tám chín mười".to_string());
+        let s = app.edit.text_edit.as_ref().expect("a session");
+        assert_eq!(s.box_height, Some(60.0));
+        let td = app.session_text_data().expect("the type");
+        assert!(crate::core::text::text_overset(&td));
+        let (_, h) = crate::core::text::upright_size(&td).expect("size");
+        assert!(h < 80, "kept to the box: {h}");
     }
 
     /// A locked type layer is not opened for editing.

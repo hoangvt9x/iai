@@ -163,6 +163,9 @@ impl App {
         self.hand_steps_to_engine();
         self.poll_engine();
         self.poll_repair_ai();
+        self.poll_smart_fill();
+        self.poll_scan_clean_pages();
+        self.poll_scan_preview();
         if self.edit.tools.active_id() == crate::tools::ToolId::Repair {
             crate::core::lama::preload();
         }
@@ -189,7 +192,7 @@ impl App {
             .window
             .as_ref()
             .is_some_and(|window| super::window_is_minimized(window));
-        if self.win.window_occluded || degenerate_size || minimized {
+        if self.win.window_occluded || degenerate_size || minimized || self.win.window_covered {
             self.win.rendering = false;
             return;
         }

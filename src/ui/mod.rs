@@ -470,6 +470,7 @@ fn text_preview_hash(td: &crate::core::text::TextData) -> u64 {
         path,
         fill,
         box_width,
+        box_height,
     } = td;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     content.hash(&mut h);
@@ -488,6 +489,7 @@ fn text_preview_hash(td: &crate::core::text::TextData) -> u64 {
     flip_x.hash(&mut h);
     flip_y.hash(&mut h);
     box_width.map(f32::to_bits).hash(&mut h);
+    box_height.map(f32::to_bits).hash(&mut h);
     if let Some(crate::core::text::TextPath {
         points,
         closed,
@@ -4044,6 +4046,7 @@ fn draw_text_editing_overlay(
                 Vec::new()
             },
             box_width: data.tool.text_box_width,
+            box_height: data.tool.text_box_height,
         };
         let te_id = egui::Id::new("text_overlay_te");
         let saved_text_range =
@@ -4073,6 +4076,16 @@ fn draw_text_editing_overlay(
             if ctx.input_mut(|i| i.consume_key(alt, egui::Key::ArrowDown)) {
                 actions.tool.set_text_line_height =
                     Some((data.tool.text_bar.line_height + 0.05).clamp(0.5, 4.0));
+            }
+        } else if let Some(at) = saved_text_range.as_ref().map(|r| r.primary.index) {
+            // Nothing selected: the space between the two letters at the
+            // caret, as Photoshop's kerning.
+            let alt = egui::Modifiers::ALT;
+            if ctx.input_mut(|i| i.consume_key(alt, egui::Key::ArrowLeft)) {
+                actions.tool.text_frame = Some(TextFrameAsk::Kern { at, delta: -1.0 });
+            }
+            if ctx.input_mut(|i| i.consume_key(alt, egui::Key::ArrowRight)) {
+                actions.tool.text_frame = Some(TextFrameAsk::Kern { at, delta: 1.0 });
             }
         }
         let text_scale = (zoom / ctx.pixels_per_point()).max(0.001);
@@ -4325,6 +4338,71 @@ fn draw_text_editing_overlay(
                 );
                 let width = (tx / stretch - left).max(8.0 / zoom.max(0.01)).max(1.0);
                 actions.tool.text_frame = Some(crate::ui::TextFrameAsk::BoxWidth(width));
+            }
+            // Its bottom edge: dragged, the box keeps that height and the
+            // lines past it are hidden, as Photoshop's.
+            let grip = local(left + box_w * 0.5, top + box_h);
+            let grip_resp = egui::Area::new(egui::Id::new("text_box_height_handle"))
+                .fixed_pos(grip - egui::vec2(6.0, 6.0))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::drag());
+                    let fill = if response.dragged() || response.hovered() {
+                        egui::Color32::from_rgb(90, 160, 255)
+                    } else {
+                        egui::Color32::WHITE
+                    };
+                    let square = egui::Rect::from_center_size(rect.center(), egui::vec2(8.0, 8.0));
+                    ui.painter().rect_filled(square, 0.0, fill);
+                    ui.painter().rect_stroke(
+                        square,
+                        0.0,
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40)),
+                        egui::StrokeKind::Outside,
+                    );
+                    if response.hovered() || response.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                        actions.tool.text_drag_handle_hovered = true;
+                    }
+                    response.on_hover_text("Box height")
+                })
+                .inner;
+            if grip_resp.dragged()
+                && let Some(pos) = grip_resp.interact_pointer_pos()
+            {
+                let (_, ty) = text_screen_to_local(
+                    text_origin,
+                    pos,
+                    text_scale,
+                    data.tool.text_rotation_deg,
+                    data.tool.text_flip_x,
+                    data.tool.text_flip_y,
+                );
+                let height = (ty - top).max(8.0 / zoom.max(0.01)).max(1.0);
+                actions.tool.text_frame = Some(crate::ui::TextFrameAsk::BoxHeight(height));
+            }
+            // Lines left out: Photoshop's red plus at the box's corner.
+            if crate::core::text::text_overset(&preview_td) {
+                let at = local(left + box_w, top + box_h);
+                let square = egui::Rect::from_center_size(at, egui::vec2(11.0, 11.0));
+                let red = egui::Color32::from_rgb(220, 40, 40);
+                painter.rect_filled(square, 0.0, egui::Color32::WHITE);
+                painter.rect_stroke(
+                    square,
+                    0.0,
+                    egui::Stroke::new(1.0_f32, red),
+                    egui::StrokeKind::Inside,
+                );
+                let stroke = egui::Stroke::new(1.5_f32, red);
+                painter.line_segment(
+                    [at - egui::vec2(3.0, 0.0), at + egui::vec2(3.0, 0.0)],
+                    stroke,
+                );
+                painter.line_segment(
+                    [at - egui::vec2(0.0, 3.0), at + egui::vec2(0.0, 3.0)],
+                    stroke,
+                );
             }
         }
 

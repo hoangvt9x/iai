@@ -126,6 +126,48 @@ impl App {
         }
     }
 
+    /// Commit a finished Smart Fill into the document it was started on.
+    pub(crate) fn poll_smart_fill(&mut self) {
+        if !self
+            .jobs
+            .smart_fill
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished())
+        {
+            return;
+        }
+        let Some(job) = self.jobs.smart_fill.take() else {
+            return;
+        };
+        let work = job.handle.join().ok().flatten();
+        let idx = self.docs.index_of(job.doc_id);
+        self.shell.status_msg = match (work, idx) {
+            (None, _) => "Smart Fill: không có gì thay đổi".to_string(),
+            (_, None) => "Smart Fill: tab gốc đã đóng — bỏ kết quả".to_string(),
+            (Some(work), Some(idx)) => {
+                let label = if work.used_ai() {
+                    "Applied Smart Fill (AI)".to_string()
+                } else {
+                    job.classic_note
+                        .unwrap_or_else(|| "Applied Smart Fill (classic)".to_string())
+                };
+                match self.docs.documents[idx].canvas.smart_fill_finish(work) {
+                    Ok(true) => {
+                        if idx == self.docs.active_doc_idx {
+                            self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+                        }
+                        label
+                    }
+                    Ok(false) => "Smart Fill: layer đã bị xoá — bỏ kết quả".to_string(),
+                    Err(why) => format!("Smart Fill: {why} — bỏ kết quả"),
+                }
+            }
+        };
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
     /// Open the Smart Fill dialog (method picker). Requires a selection.
     pub(crate) fn request_smart_fill_fill(&mut self) {
         if !self.docs.active().canvas.selection.active {
@@ -159,6 +201,39 @@ impl App {
             crate::core::lama::ensure_downloading();
         }
 
+        if self.jobs.smart_fill.is_some() {
+            self.shell.status_msg = "Smart Fill đang chạy — đợi xong đã".to_string();
+            return;
+        }
+        // The fill runs on a worker: the AI one takes seconds, and the
+        // window stayed frozen meanwhile (20/11).
+        if let Some(mut work) = self.docs.active_mut().canvas.smart_fill_begin() {
+            let doc_id = self.docs.active().id;
+            let classic_note =
+                (use_ai && !lama_ready).then(|| match crate::core::lama::status_text() {
+                    Some(s) => format!("Applied Smart Fill (classic) — {s}"),
+                    None => "Applied Smart Fill (classic)".to_string(),
+                });
+            let spawned = std::thread::Builder::new()
+                .name("smart-fill".into())
+                .spawn(move || work.run(lama_ready).then_some(work));
+            if let Ok(handle) = spawned {
+                self.jobs.smart_fill = Some(crate::app::background_jobs::SmartFillJob {
+                    doc_id,
+                    handle,
+                    classic_note,
+                });
+                self.shell.status_msg = if lama_ready {
+                    "AI đang lấp vùng chọn… (vài giây)".to_string()
+                } else {
+                    "Đang lấp vùng chọn…".to_string()
+                };
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+        }
         let ok = self.docs.active_mut().canvas.smart_fill_fill(lama_ready);
         if ok {
             self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);

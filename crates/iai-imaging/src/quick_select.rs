@@ -1268,7 +1268,7 @@ pub fn auto_enhance(
             let q = (y - y0) * rw + (x - x0);
             let alpha = (mean_a[q] * guide[q] + mean_b[q]).clamp(0.0, 1.0);
             let t = ((alpha - 0.15) / 0.7).clamp(0.0, 1.0);
-            let v = (t * t * (3.0 - 2.0 * t) * 255.0).round() as u8;
+            let v = iai_raster::fast_math::round_u8(t * t * (3.0 - 2.0 * t) * 255.0);
             let i = y * w + x;
             if mask[i] != v {
                 mask[i] = v;

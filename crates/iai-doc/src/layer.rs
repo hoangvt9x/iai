@@ -2875,6 +2875,52 @@ impl LayerStack {
         out
     }
 
+    /// Every 256-px chunk of the canvas through [`Self::flatten_chunk`], a band
+    /// of chunk rows at a time spread over the cores (each on its own cheap
+    /// copy of the stack: the chunk compositor moves layer offsets), handed to
+    /// `sink` in order. One by one this was 1.2 s on the window's thread for
+    /// Flatten Image on a large photo (20/11).
+    fn flatten_chunks_par(
+        &mut self,
+        width: u32,
+        height: u32,
+        mut sink: impl FnMut(u32, u32, u32, u32, Vec<u8>),
+    ) {
+        let (eff, targets) = self.flatten_chunk_plan();
+        let chunk = 256u32;
+        let rows: Vec<u32> = (0..height.div_ceil(chunk)).map(|r| r * chunk).collect();
+        let lanes = rayon::current_num_threads()
+            .clamp(1, 16)
+            .min(rows.len().max(1));
+        let mut stacks: Vec<LayerStack> = (0..lanes).map(|_| self.clone()).collect();
+        for band in rows.chunks(lanes) {
+            let done: Vec<Vec<(u32, u32, u32, u32, Vec<u8>)>> = band
+                .par_iter()
+                .zip(stacks.par_iter_mut())
+                .map(|(&cy, stack)| {
+                    let ch = chunk.min(height - cy);
+                    let mut out = Vec::new();
+                    let mut cx = 0;
+                    while cx < width {
+                        let cw = chunk.min(width - cx);
+                        out.push((
+                            cx,
+                            cy,
+                            cw,
+                            ch,
+                            stack.flatten_chunk(&eff, &targets, cx, cy, cw, ch),
+                        ));
+                        cx += cw;
+                    }
+                    out
+                })
+                .collect();
+            for (cx, cy, cw, ch, px) in done.into_iter().flatten() {
+                sink(cx, cy, cw, ch, px);
+            }
+        }
+    }
+
     /// Composite the visible stack for one full-width row band, top-to-bottom
     /// streaming order — no canvas-sized buffer is ever built. Feeds the
     /// Viewport-Streaming print/PDF path (and any other consumer that can eat
@@ -2921,21 +2967,10 @@ impl LayerStack {
     /// no canvas-sized buffer, so Stamp Visible runs under Viewport Streaming. Used
     /// only for large canvases; the common path keeps the exact `flatten`.
     fn flatten_into_tiles(&mut self, width: u32, height: u32) -> iai_raster::tile::TileMap {
-        let (eff, targets) = self.flatten_chunk_plan();
         let mut new_tiles = iai_raster::tile::TileMap::new(width, height);
-        let chunk = 256u32;
-        let mut cy = 0;
-        while cy < height {
-            let ch = chunk.min(height - cy);
-            let mut cx = 0;
-            while cx < width {
-                let cw = chunk.min(width - cx);
-                let out = self.flatten_chunk(&eff, &targets, cx, cy, cw, ch);
-                new_tiles.write_region(cx, cy, cw, ch, &out);
-                cx += cw;
-            }
-            cy += ch;
-        }
+        self.flatten_chunks_par(width, height, |cx, cy, cw, ch, out| {
+            new_tiles.write_region(cx, cy, cw, ch, &out);
+        });
         new_tiles
     }
 
@@ -2989,29 +3024,18 @@ impl LayerStack {
     /// folders keep their opacity, blend mode and mask), lay it over white and
     /// replace the stack with one Background layer. Chunked, no canvas buffer.
     pub fn merge_all(&mut self, width: u32, height: u32) {
-        let (eff, targets) = self.flatten_chunk_plan();
         let mut new_tiles = iai_raster::tile::TileMap::new_white(width, height);
-        let chunk = 256u32;
-        let mut cy = 0;
-        while cy < height {
-            let ch = chunk.min(height - cy);
-            let mut cx = 0;
-            while cx < width {
-                let cw = chunk.min(width - cx);
-                let mut composite = self.flatten_chunk(&eff, &targets, cx, cy, cw, ch);
-                // Flatten discards transparency: straight-alpha over white.
-                for px in composite.chunks_exact_mut(4) {
-                    let a = px[3] as f32 / 255.0;
-                    for c in &mut px[..3] {
-                        *c = (*c as f32 * a + 255.0 * (1.0 - a)).round() as u8;
-                    }
-                    px[3] = 255;
+        self.flatten_chunks_par(width, height, |cx, cy, cw, ch, mut composite| {
+            // Flatten discards transparency: straight-alpha over white.
+            for px in composite.chunks_exact_mut(4) {
+                let a = px[3] as f32 / 255.0;
+                for c in &mut px[..3] {
+                    *c = iai_raster::fast_math::round_u8(*c as f32 * a + 255.0 * (1.0 - a));
                 }
-                new_tiles.write_region(cx, cy, cw, ch, &composite);
-                cx += cw;
+                px[3] = 255;
             }
-            cy += ch;
-        }
+            new_tiles.write_region(cx, cy, cw, ch, &composite);
+        });
 
         self.layers.clear();
         self.next_id = 1;

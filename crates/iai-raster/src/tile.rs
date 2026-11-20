@@ -1154,7 +1154,7 @@ impl TileMap {
                     let nv = if s >= 0.999 {
                         lu
                     } else {
-                        (lu as f32 * s + old as f32 * (1.0 - s)).round() as u8
+                        crate::fast_math::round_u8(lu as f32 * s + old as f32 * (1.0 - s))
                     };
                     if nv != old {
                         new_ink[i + c] = nv;
@@ -1829,59 +1829,31 @@ impl TileMap {
     /// Result is (min_x, min_y, max_x_exclusive, max_y_exclusive), all in layer pixels.
     /// Returns `None` if the TileMap is entirely transparent / empty.
     pub fn content_bounds(&self) -> Option<(i32, i32, i32, i32)> {
-        if self.tiles.is_empty() {
-            return None;
-        }
-        let mut min_x = i32::MAX;
-        let mut min_y = i32::MAX;
-        let mut max_x = i32::MIN;
-        let mut max_y = i32::MIN;
-
-        for (pos, tile) in &self.tiles {
-            let tile_px = pos.x * TILE_SIZE as i32;
-            let tile_py = pos.y * TILE_SIZE as i32;
-            let data = &tile.pixels;
-
-            let has_alpha = data.chunks(4).any(|px| px[3] > 0);
-            if !has_alpha {
-                continue;
-            }
-
-            for py in 0..TILE_SIZE as i32 {
-                let row_base = (py as usize * TILE_SIZE as usize) * 4;
-                let cy = tile_py + py;
-                if cy < 0 || cy >= self.height as i32 {
-                    continue;
+        // Every tile on its own, in parallel; each row stops at its first and
+        // last inked pixel (a whole-page scan was 0.2-0.8 s on the window's
+        // thread at each Move release, 20/11).
+        self.tiles
+            .par_iter()
+            .filter_map(|(pos, tile)| {
+                let tile_px = pos.x * TILE_SIZE as i32;
+                let tile_py = pos.y * TILE_SIZE as i32;
+                // The part of the tile inside the layer.
+                let c0 = (-tile_px).clamp(0, TILE_SIZE as i32) as usize;
+                let r0 = (-tile_py).clamp(0, TILE_SIZE as i32) as usize;
+                let c1 = (self.width as i32 - tile_px).clamp(0, TILE_SIZE as i32) as usize;
+                let r1 = (self.height as i32 - tile_py).clamp(0, TILE_SIZE as i32) as usize;
+                if c0 >= c1 || r0 >= r1 {
+                    return None;
                 }
-                for px in 0..TILE_SIZE as i32 {
-                    let cx = tile_px + px;
-                    if cx < 0 || cx >= self.width as i32 {
-                        continue;
-                    }
-                    let a = data[row_base + px as usize * 4 + 3];
-                    if a > 0 {
-                        if cx < min_x {
-                            min_x = cx;
-                        }
-                        if cy < min_y {
-                            min_y = cy;
-                        }
-                        if cx + 1 > max_x {
-                            max_x = cx + 1;
-                        }
-                        if cy + 1 > max_y {
-                            max_y = cy + 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        if min_x == i32::MAX {
-            None
-        } else {
-            Some((min_x, min_y, max_x, max_y))
-        }
+                let (lo, top, hi, bottom) = tile_alpha_bounds(&tile.pixels, c0, r0, c1, r1)?;
+                Some((
+                    tile_px + lo as i32,
+                    tile_py + top as i32,
+                    tile_px + hi as i32,
+                    tile_py + bottom as i32,
+                ))
+            })
+            .reduce_with(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
     }
 
     pub fn flip_v(&self) -> Self {
@@ -1967,9 +1939,7 @@ impl TileMap {
 /// single-channel plate.
 #[inline]
 pub fn luma_u8(r: u8, g: u8, b: u8) -> u8 {
-    (r as f32 * 0.2126 + g as f32 * 0.7152 + b as f32 * 0.0722)
-        .round()
-        .clamp(0.0, 255.0) as u8
+    crate::fast_math::round_u8(r as f32 * 0.2126 + g as f32 * 0.7152 + b as f32 * 0.0722)
 }
 
 /// Blend `src` (normalised RGB) into the write-enabled colour channels of a
@@ -1982,7 +1952,7 @@ pub fn blend_masked(px: &mut [u8], src: [f32; 3], cov: f32, wm: [bool; 4]) {
     for c in 0..3 {
         if wm[c] {
             let d = px[c] as f32 / 255.0;
-            px[c] = ((d + (src[c] - d) * cov) * 255.0).round() as u8;
+            px[c] = crate::fast_math::round_u8((d + (src[c] - d) * cov) * 255.0);
         }
     }
 }
@@ -2246,9 +2216,76 @@ impl BilinearCursor<'_, '_> {
     }
 }
 
+/// Tight box of the pixels with alpha in columns `c0..c1`, rows `r0..r1` of
+/// one tile, in tile pixels (end exclusive).
+fn tile_alpha_bounds(
+    data: &[u8],
+    c0: usize,
+    r0: usize,
+    c1: usize,
+    r1: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    let row_len = TILE_SIZE as usize * 4;
+    let mut found: Option<(usize, usize, usize, usize)> = None;
+    for y in r0..r1 {
+        let row = &data[y * row_len..(y + 1) * row_len];
+        let alpha = |x: usize| row[x * 4 + 3] != 0;
+        let Some(first) = (c0..c1).find(|&x| alpha(x)) else {
+            continue;
+        };
+        // Only the part right of what is known can still widen the box.
+        let known_hi = found.map_or(first, |f| f.2.max(first + 1) - 1);
+        let last = (known_hi.max(first)..c1)
+            .rev()
+            .find(|&x| alpha(x))
+            .unwrap_or(first);
+        found = Some(match found {
+            None => (first, y, last + 1, y + 1),
+            Some((a, b, c, _)) => (a.min(first), b, c.max(last + 1), y + 1),
+        });
+    }
+    found
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_bounds_matches_a_pixel_by_pixel_scan() {
+        let brute = |m: &TileMap| {
+            let mut b: Option<(i32, i32, i32, i32)> = None;
+            for y in 0..m.height {
+                for x in 0..m.width {
+                    if m.get_pixel(x, y).3 > 0 {
+                        let (x, y) = (x as i32, y as i32);
+                        b = Some(b.map_or((x, y, x + 1, y + 1), |(a, c, d, e)| {
+                            (a.min(x), c.min(y), d.max(x + 1), e.max(y + 1))
+                        }));
+                    }
+                }
+            }
+            b
+        };
+        let mut seed = 7u32;
+        for case in 0..12 {
+            let (w, h) = (300 + case * 37, 280 + case * 23);
+            let mut m = TileMap::new(w, h);
+            assert_eq!(m.content_bounds(), None);
+            for _ in 0..(case * 3 + 1) {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let x = (seed >> 8) % w;
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let y = (seed >> 8) % h;
+                m.set_pixel(x, y, 1, 2, 3, 9);
+            }
+            assert_eq!(m.content_bounds(), brute(&m), "case {case}");
+        }
+        // Ink past the layer's edge in a part-filled edge tile is not counted.
+        let mut m = TileMap::new(300, 300);
+        m.set_pixel(299, 299, 0, 0, 0, 255);
+        m.get_tile_mut(TilePos { x: 1, y: 1 }).pixels[(100 * 256 + 100) * 4 + 3] = 255;
+        assert_eq!(m.content_bounds(), Some((299, 299, 300, 300)));
+    }
 
     #[test]
     fn dither_without_libm_round_is_the_same() {
@@ -2261,9 +2298,9 @@ mod tests {
                         _ => (5, 2),
                     };
                     let t = bayer8(x + ox, y + oy);
-                    let before = ((v as f32 / 65535.0).clamp(0.0, 1.0) * 255.0 + (t - 0.5))
-                        .round()
-                        .clamp(0.0, 255.0) as u8;
+                    let before = crate::fast_math::round_u8(
+                        (v as f32 / 65535.0).clamp(0.0, 1.0) * 255.0 + (t - 0.5),
+                    );
                     assert_eq!(
                         dither16_to_u8(v, x, y, ch),
                         before,
@@ -2355,7 +2392,7 @@ mod tests {
         let b = lerp(lerp(c00[2], c10[2], fx), lerp(c01[2], c11[2], fx), fy) / a;
 
         fn to_u8(v: f32) -> u8 {
-            (v * 255.0).round().clamp(0.0, 255.0) as u8
+            crate::fast_math::round_u8(v * 255.0)
         }
         (to_u8(r), to_u8(g), to_u8(b), to_u8(a))
     }

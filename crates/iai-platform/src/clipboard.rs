@@ -76,6 +76,22 @@ pub fn read_image(max_dimension: u32) -> Result<Option<OsClipboardImage>, String
     }))
 }
 
+/// A number Windows moves on every change of the clipboard's content, by any
+/// program; `None` where there is none. Equal numbers mean nothing was copied
+/// in between, so what iai wrote is still there.
+pub fn sequence_number() -> Option<u32> {
+    #[cfg(windows)]
+    {
+        // SAFETY: takes no arguments and only reads a counter of the session.
+        let n = unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+        (n != 0).then_some(n)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// The resolution the OS clipboard's image records, in pixels per inch: the
 /// pHYs chunk of its PNG, else the header of its DIB. `None` when it records
 /// none, as an image copied in a browser or in Zalo mostly does.

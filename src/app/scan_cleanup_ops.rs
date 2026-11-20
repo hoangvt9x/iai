@@ -4,14 +4,16 @@
 //! a page range, or every page. The pixel maths lives in
 //! [`crate::core::scan_cleanup`]; this drives it against the app's documents.
 
+use super::jobs::{Job, Polled};
 use super::render::CanvasEvent;
-use super::state::{App, ScanPreviewSession};
+use super::state::{App, ScanPreviewMade, ScanPreviewSession};
 use crate::core::canvas::Canvas;
 use crate::core::scan_cleanup::{
     ScanBackground, ScanCleanScope, ScanCleanupParams, ScanCleanupRequest, apply_with_background,
     clean_scan_rgba, resolve_pages,
 };
 use crate::core::tile::TileMap;
+use std::sync::Arc;
 
 const CLEAN_LABEL: &str = "Làm sạch bản scan";
 
@@ -34,9 +36,7 @@ impl App {
         if (!layer.is_background && layer.locked) || !layer.is_raster() {
             return;
         }
-        let src_rgba = layer.flatten_tiles();
-        let background =
-            ScanBackground::estimate(&src_rgba, layer.width as usize, layer.height as usize);
+        let src_rgba = Arc::new(layer.flatten_tiles());
         self.shell.scan_preview = Some(ScanPreviewSession {
             doc_id: self.docs.documents[idx].id,
             layer_id: layer.id,
@@ -44,35 +44,104 @@ impl App {
             h: layer.height,
             original_tiles: layer.tiles.clone(),
             src_rgba,
-            background,
+            background: None,
             shown: None,
+            want: None,
+            job: None,
         });
         self.update_scan_preview(ScanCleanupParams::default());
     }
 
-    /// Re-run the cheap final pass for `params` and show it on the canvas. Cheap
-    /// enough to call every frame while a slider drags; deduplicated so an
-    /// unchanged frame does no work.
+    /// Show the page cleaned with `params`: made on a worker (the page's
+    /// background measured on the first), put on the canvas by
+    /// `poll_scan_preview` when done. While a slider drags only the last
+    /// settings asked for are made.
     pub(crate) fn update_scan_preview(&mut self, params: ScanCleanupParams) {
-        let idx = self.docs.active_doc_idx;
-        let doc_id = self.docs.documents[idx].id;
-        let Some(session) = self.shell.scan_preview.as_ref() else {
+        let doc_id = self.docs.active().id;
+        let Some(session) = self.shell.scan_preview.as_mut() else {
             return;
         };
-        if session.doc_id != doc_id || session.shown.as_ref().is_some_and(|(p, _)| *p == params) {
+        if session.doc_id != doc_id {
             return;
         }
-        let cleaned = apply_with_background(&session.src_rgba, &session.background, params);
-        let (layer_id, w, h) = (session.layer_id, session.w, session.h);
-        let tiles = TileMap::from_rgba(&cleaned, w, h);
-        self.docs.documents[idx]
-            .canvas
-            .preview_layer_tiles(layer_id, tiles.clone());
-        if let Some(s) = self.shell.scan_preview.as_mut() {
-            s.shown = Some((params, tiles));
+        session.want = Some(params);
+        self.poll_scan_preview();
+    }
+
+    /// Once a frame: put a finished preview on the canvas, start the next
+    /// one when the dialog asks for other settings than shown.
+    pub(crate) fn poll_scan_preview(&mut self) {
+        let Some(session) = self.shell.scan_preview.as_mut() else {
+            return;
+        };
+        if let Some(job) = &session.job {
+            match job.poll() {
+                Polled::Pending => {
+                    if let Some(win) = &self.win.window {
+                        win.request_redraw();
+                    }
+                    return;
+                }
+                Polled::Done(made) => {
+                    session.job = None;
+                    let (doc_id, layer_id) = (session.doc_id, session.layer_id);
+                    session.background = Some(made.background);
+                    session.shown = Some((made.params, made.tiles.clone()));
+                    if let Some(doc) = self.docs.by_id_mut(doc_id) {
+                        doc.canvas.preview_layer_tiles(layer_id, made.tiles);
+                    }
+                    if let Some(win) = &self.win.window {
+                        win.request_redraw();
+                    }
+                }
+                Polled::Failed(_) => {
+                    session.job = None;
+                    session.want = None;
+                    return;
+                }
+            }
         }
+        let Some(session) = self.shell.scan_preview.as_mut() else {
+            return;
+        };
+        let Some(params) = session.want else {
+            return;
+        };
+        if session.shown.as_ref().is_some_and(|(p, _)| *p == params) {
+            return;
+        }
+        let src = Arc::clone(&session.src_rgba);
+        let known = session.background.clone();
+        let (w, h) = (session.w, session.h);
+        session.job = Some(Job::spawn("scan-preview", move || {
+            let background = known.unwrap_or_else(|| {
+                Arc::new(ScanBackground::estimate(&src, w as usize, h as usize))
+            });
+            let cleaned = apply_with_background(&src, &background, params);
+            ScanPreviewMade {
+                params,
+                background,
+                tiles: TileMap::from_rgba(&cleaned, w, h),
+            }
+        }));
         if let Some(win) = &self.win.window {
             win.request_redraw();
+        }
+    }
+
+    /// Wait for the preview being made and show it (OK on the dialog, right
+    /// after a slider's move, commits it rather than cleaning afresh).
+    pub(crate) fn settle_scan_preview_now(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while self
+            .shell
+            .scan_preview
+            .as_ref()
+            .is_some_and(|s| s.job.is_some())
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            self.poll_scan_preview();
         }
     }
 
@@ -81,6 +150,7 @@ impl App {
     /// document cleaned with `params`. Otherwise restore the layer and clean
     /// what the request names afresh.
     pub(crate) fn commit_scan_cleanup(&mut self, req: ScanCleanupRequest) {
+        self.settle_scan_preview_now();
         let idx = self.docs.active_doc_idx;
         let single = matches!(req.scope, ScanCleanScope::CurrentPage)
             || (self.docs.documents[idx].pdf_document.is_none()
@@ -142,6 +212,11 @@ impl App {
     /// Dialog entry point. Routes to the single-canvas path (a plain image or the
     /// current PDF page) or the multi-page PDF batch.
     pub(crate) fn apply_scan_cleanup(&mut self, req: ScanCleanupRequest) {
+        if self.jobs.scan_clean_pages.is_some() {
+            self.shell.status_msg =
+                format!("{CLEAN_LABEL}: đang làm các trang trước — đợi xong đã");
+            return;
+        }
         if matches!(req.scope, ScanCleanScope::AllDocuments) {
             self.clean_scan_all_documents(req.params);
             if let Some(w) = &self.win.window {
@@ -279,6 +354,10 @@ impl App {
 
         let mut cleaned = 0usize;
         let mut errors = 0usize;
+        // Pages not opened yet are rendered and cleaned on a worker, all at
+        // once: one by one on the window's thread they froze it 2.4 s for 11
+        // pages (19/11). `poll_scan_clean_pages` puts them in.
+        let mut fresh: Vec<usize> = Vec::new();
         for page in pages {
             if page == active_page {
                 match self.clean_scan_active_layer(params) {
@@ -299,30 +378,47 @@ impl App {
                 }
                 continue;
             }
-            match crate::formats::pdf::PdfImporter::render_selected(
-                &source,
-                &[page],
-                Some(requested_dpi),
-            ) {
-                Ok(mut canvases) => match canvases.pop() {
-                    Some(mut canvas) => {
-                        if clean_scan_canvas_base(&mut canvas, params) {
-                            self.install_cleaned_pdf_page(
-                                idx,
-                                page,
-                                group_id,
-                                &source,
-                                page_count,
-                                requested_dpi,
-                                canvas,
-                            );
-                            cleaned += 1;
-                        } else {
-                            errors += 1;
-                        }
-                    }
-                    None => errors += 1,
-                },
+            fresh.push(page);
+        }
+        if !fresh.is_empty() {
+            let worker_source = source.clone();
+            let spawned = std::thread::Builder::new()
+                .name("scan-clean".into())
+                .spawn(move || {
+                    use rayon::prelude::*;
+                    fresh
+                        .par_iter()
+                        .map(|&page| {
+                            let canvas = crate::formats::pdf::PdfImporter::render_selected(
+                                &worker_source,
+                                &[page],
+                                Some(requested_dpi),
+                            )
+                            .ok()
+                            .and_then(|mut c| c.pop())
+                            .and_then(|mut canvas| {
+                                clean_scan_canvas_base(&mut canvas, params).then_some(canvas)
+                            });
+                            (page, canvas)
+                        })
+                        .collect()
+                });
+            match spawned {
+                Ok(handle) => {
+                    self.jobs.scan_clean_pages = Some(ScanCleanPagesJob {
+                        doc_id: self.docs.documents[idx].id,
+                        group_id,
+                        source,
+                        page_count,
+                        dpi: requested_dpi,
+                        cleaned,
+                        errors,
+                        handle,
+                    });
+                    self.refresh_active_document();
+                    self.shell.status_msg = format!("{CLEAN_LABEL}: đang làm sạch các trang…");
+                    return;
+                }
                 Err(_) => errors += 1,
             }
         }
@@ -333,6 +429,64 @@ impl App {
         } else {
             format!("{CLEAN_LABEL}: {cleaned} trang xong, {errors} trang lỗi")
         };
+    }
+
+    /// Put in the pages a multi-page clean made on its worker, once it is done.
+    pub(crate) fn poll_scan_clean_pages(&mut self) {
+        if !self
+            .jobs
+            .scan_clean_pages
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished())
+        {
+            return;
+        }
+        let Some(job) = self.jobs.scan_clean_pages.take() else {
+            return;
+        };
+        let pages = job.handle.join().unwrap_or_default();
+        let (mut cleaned, mut errors) = (job.cleaned, job.errors);
+        let Some(idx) = self.docs.index_of(job.doc_id) else {
+            self.shell.status_msg = format!("{CLEAN_LABEL}: tab gốc đã đóng — bỏ kết quả");
+            return;
+        };
+        for (page, canvas) in pages {
+            // Opened meanwhile (shown, or edited): left as it is now.
+            let taken = self.docs.documents[idx]
+                .pdf_document
+                .as_ref()
+                .is_none_or(|pdf| {
+                    pdf.active_page == page
+                        || pdf.edited_pages.contains_key(&page)
+                        || pdf.effective_source() != job.source.as_path()
+                });
+            match canvas {
+                Some(canvas) if !taken => {
+                    self.install_cleaned_pdf_page(
+                        idx,
+                        page,
+                        job.group_id,
+                        &job.source,
+                        job.page_count,
+                        job.dpi,
+                        canvas,
+                    );
+                    cleaned += 1;
+                }
+                _ => errors += 1,
+            }
+        }
+        if idx == self.docs.active_doc_idx {
+            self.refresh_active_document();
+        }
+        self.shell.status_msg = if errors == 0 {
+            format!("{CLEAN_LABEL}: đã làm sạch {cleaned} trang")
+        } else {
+            format!("{CLEAN_LABEL}: {cleaned} trang xong, {errors} trang lỗi")
+        };
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
     }
 
     /// Clean an already-edited (cached, inactive) page's base layer in place.
@@ -398,6 +552,20 @@ impl App {
             );
         }
     }
+}
+
+/// A multi-page clean's pages that were not open, rendered and cleaned on a
+/// worker (see `poll_scan_clean_pages`).
+pub(in crate::app) struct ScanCleanPagesJob {
+    doc_id: crate::core::document::DocumentId,
+    group_id: u32,
+    source: std::path::PathBuf,
+    page_count: usize,
+    dpi: f32,
+    /// Pages done (or failed) before the worker started.
+    cleaned: usize,
+    errors: usize,
+    handle: std::thread::JoinHandle<Vec<(usize, Option<Canvas>)>>,
 }
 
 /// Clean a canvas's base (page-0) raster layer in place, recompositing so a
@@ -468,6 +636,7 @@ mod tests {
         let undo_before = app.docs.documents[0].canvas.undo_count();
         app.begin_scan_preview();
         app.update_scan_preview(req.params);
+        app.settle_scan_preview_now();
         let shown = layer_pixels(&app);
         assert_eq!(shown, clean_scan_rgba(&original, 300, 220, req.params));
 
@@ -500,6 +669,7 @@ mod tests {
         let (mut app, original) = app_with_page();
         let undo_before = app.docs.documents[0].canvas.undo_count();
         app.begin_scan_preview();
+        app.settle_scan_preview_now();
         assert_ne!(layer_pixels(&app), original);
         app.cancel_scan_preview();
         assert_eq!(layer_pixels(&app), original);

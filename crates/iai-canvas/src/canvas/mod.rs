@@ -26,7 +26,7 @@ pub use iai_doc::layer::BlendMode;
 pub use iai_doc::model::canvas::{
     BitDepth, CanvasMetadata, CmykProfile, ColorMode, ColorSpace, DirtyRegion, IccProfile,
 };
-pub use raster_ops::SpotHealWork;
+pub use raster_ops::{SmartFillWork, SpotHealWork};
 
 pub const DEFAULT_W: u32 = 1920;
 pub const DEFAULT_H: u32 = 1080;

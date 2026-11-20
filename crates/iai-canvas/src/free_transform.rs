@@ -626,6 +626,9 @@ pub fn scaled_text_data(td: &TextData, sx: f32, sy: f32) -> Option<TextData> {
     if let Some(w) = out.box_width {
         out.box_width = Some(clamped_or_bail(w * font_scale, 1.0, 100_000.0)?);
     }
+    if let Some(h) = out.box_height {
+        out.box_height = Some(clamped_or_bail(h * font_scale, 1.0, 100_000.0)?);
+    }
     Some(out)
 }
 
@@ -1170,10 +1173,9 @@ pub fn bake_transform_commit(
                                         filtered.0,
                                         filtered.1,
                                         filtered.2,
-                                        (clamped.3 as f32 * sharp_coverage)
-                                            .round()
-                                            .clamp(0.0, 255.0)
-                                            as u8,
+                                        iai_raster::fast_math::round_u8(
+                                            clamped.3 as f32 * sharp_coverage,
+                                        ),
                                     )
                                 }
                             } else {

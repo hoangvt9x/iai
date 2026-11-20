@@ -22,6 +22,8 @@ pub struct WindowRuntime {
     /// Authoritative minimized/covered state; Windows does not always report a
     /// zero inner size for a minimized window.
     pub(in crate::app) window_occluded: bool,
+    /// Other programs' windows cover all of it (see `cursor::covered_by_others`).
+    pub(in crate::app) window_covered: bool,
     /// Deadline until which keyboard/IME-driven strict-modal bookkeeping must
     /// NOT ring the blocked-action bell. Set a short window ahead each time a
     /// key/IME event is handed to the live TextEdit. A window (not a one-shot

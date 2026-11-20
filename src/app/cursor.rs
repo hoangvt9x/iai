@@ -91,6 +91,61 @@ mod system {
         hwnd_of(window).is_some_and(|hwnd| unsafe { GetForegroundWindow() } == hwnd)
     }
 
+    /// Every one of nine points spread over the window's client area shows
+    /// another program's window: the window cannot be seen.
+    pub fn covered_by_others(window: &winit::window::Window) -> bool {
+        use windows_sys::Win32::Foundation::{POINT, RECT};
+        use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GA_ROOT, GetAncestor, GetClientRect, WindowFromPoint,
+        };
+        let Some(hwnd) = hwnd_of(window) else {
+            return false;
+        };
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let mut corner = POINT { x: 0, y: 0 };
+        // SAFETY: both write only into `rect` / `corner`, ours; `hwnd` is
+        // this thread's own window.
+        let placed = unsafe {
+            GetClientRect(hwnd, &mut rect) != 0 && ClientToScreen(hwnd, &mut corner) != 0
+        };
+        let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+        if !placed || w < 8 || h < 8 {
+            return false;
+        }
+        // SAFETY: only reads the system's own state.
+        let ours = unsafe { GetCurrentProcessId() };
+        for fy in [1, 4, 7] {
+            for fx in [1, 4, 7] {
+                let at = POINT {
+                    x: corner.x + w * fx / 8,
+                    y: corner.y + h * fy / 8,
+                };
+                // SAFETY: only reads which window is at a point and whose
+                // it is; `process` is ours to write.
+                let theirs = unsafe {
+                    let top = WindowFromPoint(at);
+                    if top.is_null() {
+                        // Off every screen: not known to be covered.
+                        return false;
+                    }
+                    let mut process = 0;
+                    GetWindowThreadProcessId(GetAncestor(top, GA_ROOT), &mut process);
+                    process != ours
+                };
+                if !theirs {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Which window is in front, active and focused, as the journal says it.
     fn held(hwnd: HWND) -> String {
         let which = |other: HWND| match other {
@@ -151,6 +206,21 @@ pub(super) fn pointer_on(window: &winit::window::Window) -> Option<(f32, f32)> {
 pub(super) fn is_in_front(window: &winit::window::Window) -> bool {
     #[cfg(target_os = "windows")]
     return system::is_in_front(window);
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        false
+    }
+}
+
+/// Whether other programs' windows cover all of `window` (one maximized
+/// over it, say). While they do the window is not drawn: the graphics
+/// driver can hold a frame of a covered window a whole second (206 such in
+/// the flight recorder, 05-19/11, mostly with Antigravity or a printer's
+/// dialog in front). Only Windows is asked.
+pub(super) fn covered_by_others(window: &winit::window::Window) -> bool {
+    #[cfg(target_os = "windows")]
+    return system::covered_by_others(window);
     #[cfg(not(target_os = "windows"))]
     {
         let _ = window;

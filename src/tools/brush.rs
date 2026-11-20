@@ -269,9 +269,9 @@ fn smootherstep01(t: f32) -> f32 {
 }
 
 /// The round tip iAi drew before it was measured against Photoshop: zero at
-/// the radius. Clone / Repair and Smudge still use it (their dab loops, and
-/// Repair's healing membrane, stop at the radius); moving them to
-/// [`RoundTip`] is its own step of the brush audit.
+/// the radius. Only healing (Repair, Clone's heal modes) still uses it: its
+/// membrane stops at the radius. Clone and Smudge paint [`RoundTip`] since
+/// 20/11.
 #[inline]
 pub(crate) fn legacy_round_alpha(dist2: f32, radius: f32, hardness: f32) -> f32 {
     if radius <= 0.0 {
@@ -1403,13 +1403,15 @@ impl BrushTool {
                                 if wm[c] {
                                     let d = plane[i + c] as f32 / 255.0;
                                     let t = target[c] as f32 / 255.0;
-                                    plane[i + c] = ((d + (t - d) * src_a) * 255.0).round() as u8;
+                                    plane[i + c] = crate::core::fast_math::round_u8(
+                                        (d + (t - d) * src_a) * 255.0,
+                                    );
                                 }
                             }
                             touched.push(i);
                         } else if is_eraser {
                             let new_a = dst_a * (1.0 - src_a);
-                            pixels[i + 3] = (new_a * 255.0).round() as u8;
+                            pixels[i + 3] = crate::core::fast_math::round_u8(new_a * 255.0);
                             if new_a < 0.001 {
                                 plane[i] = 0;
                                 plane[i + 1] = 0;
@@ -1434,9 +1436,9 @@ impl BrushTool {
                                 let d = plane[i + c] as f32 / 255.0;
                                 let s = fg_ink[c] as f32 / 255.0;
                                 let out = (s * src_a + d * dw) / new_a;
-                                plane[i + c] = (out * 255.0).round().clamp(0.0, 255.0) as u8;
+                                plane[i + c] = crate::core::fast_math::round_u8(out * 255.0);
                             }
-                            pixels[i + 3] = (new_a * 255.0).round() as u8;
+                            pixels[i + 3] = crate::core::fast_math::round_u8(new_a * 255.0);
                             touched.push(i);
                         }
                     }

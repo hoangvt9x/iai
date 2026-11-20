@@ -616,6 +616,40 @@ impl Session<'_> {
         count
     }
 
+    /// The answer `call` would have had, run at once, now that the job it
+    /// was run as in the background (so a window's frames did not wait on
+    /// it) has ended as `state`: an agent's `after` work is added, its
+    /// request id answers with it from now on.
+    pub fn reply_for_job(
+        &mut self,
+        call: &CommandCall,
+        state: Option<JobState>,
+    ) -> Result<Reply, CmdError> {
+        match state {
+            Some(JobState::Done { mut result, .. }) => {
+                if self.engine.source == Source::Agent
+                    && let Some(after) = self.engine.registry.agent_guard().and_then(|g| g.after)
+                {
+                    after(self, call, &mut result);
+                }
+                let revision = self.target_revision(&call.args);
+                let reply = Reply::Done { result, revision };
+                if let Some(rid) = call.request_id.clone() {
+                    self.engine.remember_reply(rid, reply.clone());
+                }
+                Ok(reply)
+            }
+            Some(JobState::Failed { error }) => Err(error),
+            Some(JobState::Cancelled) => {
+                Err(CmdError::new(ErrorCode::Cancelled, "the job was cancelled").vi("Đã hủy"))
+            }
+            Some(JobState::Running { .. }) | None => Err(CmdError::internal(format!(
+                "`{}`: its job's end was not kept",
+                call.command
+            ))),
+        }
+    }
+
     /// Poll until `job` has ended or `timeout` has passed; its state then.
     pub fn wait(&mut self, job: JobId, timeout: Duration) -> Option<JobState> {
         let start = Instant::now();

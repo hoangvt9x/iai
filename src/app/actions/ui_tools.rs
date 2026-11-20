@@ -123,6 +123,7 @@ impl App {
                 w.request_redraw();
             }
         }
+        let kern_base = (self.text_kern_base_style(), self.edit.text_tracking_px);
         if let Some(ask) = actions.tool.text_frame.take()
             && let Some(session) = &mut self.edit.text_edit
         {
@@ -137,6 +138,14 @@ impl App {
                     if w.is_finite() {
                         session.box_width = Some(w.clamp(1.0, 100_000.0));
                     }
+                }
+                crate::ui::TextFrameAsk::BoxHeight(h) => {
+                    if h.is_finite() && session.box_width.is_some() {
+                        session.box_height = Some(h.clamp(1.0, 100_000.0));
+                    }
+                }
+                crate::ui::TextFrameAsk::Kern { at, delta } => {
+                    crate::app::text_ops::kern_at_caret(session, kern_base.clone(), at, delta);
                 }
             }
             self.edit.text_focus_pending = false;
@@ -1016,6 +1025,22 @@ impl App {
         if let Some(action) = actions.tool.move_transform.take() {
             self.apply_move_transform_action(action);
             self.sync_cursor(event_loop);
+        }
+    }
+}
+
+impl App {
+    /// The text bar's style as a letter's own, with no spacing of its own.
+    pub(in crate::app) fn text_kern_base_style(&self) -> crate::core::text::GlyphStyle {
+        crate::core::text::GlyphStyle {
+            color: self.edit.text_color,
+            font_px: self.edit.text_font_px,
+            font_family: self.edit.text_font_family.clone(),
+            bold: self.edit.text_bold,
+            italic: self.edit.text_italic,
+            underline: self.edit.text_underline,
+            tracking_px: None,
+            line_height: None,
         }
     }
 }

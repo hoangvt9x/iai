@@ -300,6 +300,7 @@ fn new_canvas_start(
 impl App {
     pub fn open_new_canvas_dialog_with_clipboard_hint(&mut self) {
         self.shell.ui.show_new_dialog = true;
+        self.settle_os_clipboard_write();
         let image = match read_os_clipboard_image() {
             Ok(image) => image,
             Err(err) => {
@@ -405,11 +406,21 @@ impl App {
             os_sync.as_ref().map(|&((x, y), bw, bh, _)| (x, y, bw, bh));
         self.edit.clipboard_source_canvas = Some((canvas_w, canvas_h));
         self.edit.clipboard_source_ppi = Some(self.docs.active().canvas.metadata.resolution_ppi);
-        self.edit.os_clipboard_written =
-            os_sync.and_then(|(_, bw, bh, rgba)| os_clipboard::write_image(bw, bh, &rgba).ok());
+        // The write encodes the image and reads it back: on a worker, so
+        // Ctrl+C does not hold the window (20/11). A paste waits for it.
+        self.edit.os_clipboard_written = None;
+        self.edit.os_clipboard_seq = None;
+        self.edit.os_clipboard_job = os_sync.map(|(_, bw, bh, rgba)| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let hash = os_clipboard::write_image(bw, bh, &rgba).ok();
+                let _ = tx.send(hash.map(|h| (h, os_clipboard::sequence_number())));
+            });
+            rx
+        });
         self.edit.clipboard = Some(block);
         self.edit.clipboard_image_new_doc_hint = None;
-        let os_note = if self.edit.os_clipboard_written.is_some() {
+        let os_note = if self.edit.os_clipboard_job.is_some() {
             " (+ system clipboard)"
         } else {
             ""
@@ -443,7 +454,20 @@ impl App {
     /// Works across documents — the clipboard is app-level.
     pub fn do_paste(&mut self) {
         let t0 = std::time::Instant::now();
-        match read_os_clipboard_image() {
+        self.settle_os_clipboard_write();
+        // Nothing copied anywhere since iai's own write: the image there is
+        // that copy's mirror, and the layers paste without decoding it.
+        let still_ours = self.edit.clipboard.is_some()
+            && self.edit.os_clipboard_written.is_some()
+            && self.edit.os_clipboard_seq.is_some()
+            && self.edit.os_clipboard_seq == os_clipboard::sequence_number()
+            && self.edit.clipboard_image_new_doc_hint.is_none();
+        let os_image = if still_ours {
+            Ok(None)
+        } else {
+            read_os_clipboard_image()
+        };
+        match os_image {
             Ok(Some(image)) if self.should_paste_os_clipboard_image(&image) => {
                 let t_read = t0.elapsed().as_millis();
                 self.paste_os_clipboard_image(image);
@@ -560,6 +584,17 @@ impl App {
     /// layer clipboard. The internal clipboard wins only while the OS clipboard
     /// still holds what iai itself wrote (same content hash) — as soon as another
     /// app copies something newer, that image wins.
+    /// Wait for a copy's OS clipboard write still on its worker, and keep what
+    /// it came to. Anything that compares the OS clipboard with iai's own
+    /// write calls this first.
+    pub(in crate::app) fn settle_os_clipboard_write(&mut self) {
+        if let Some(rx) = self.edit.os_clipboard_job.take() {
+            let done = rx.recv().ok().flatten();
+            self.edit.os_clipboard_written = done.map(|d| d.0);
+            self.edit.os_clipboard_seq = done.and_then(|d| d.1);
+        }
+    }
+
     fn should_paste_os_clipboard_image(&self, image: &OsClipboardImage) -> bool {
         prefer_os_clipboard_image(
             self.edit.clipboard.is_some(),

@@ -566,12 +566,25 @@ pub struct ScanPreviewSession {
     pub w: u32,
     pub h: u32,
     pub original_tiles: crate::core::tile::TileMap,
-    pub src_rgba: Vec<u8>,
-    pub background: crate::core::scan_cleanup::ScanBackground,
+    pub src_rgba: std::sync::Arc<Vec<u8>>,
+    /// The page's background, measured on the first preview's worker.
+    pub background: Option<std::sync::Arc<crate::core::scan_cleanup::ScanBackground>>,
     pub shown: Option<(
         crate::core::scan_cleanup::ScanCleanupParams,
         crate::core::tile::TileMap,
     )>,
+    /// The settings the dialog asks to see; shown once `job` makes them.
+    pub want: Option<crate::core::scan_cleanup::ScanCleanupParams>,
+    /// The preview being made, off the window's thread (a slider's move
+    /// held the frame 0.15-0.3 s on a page).
+    pub(in crate::app) job: Option<super::jobs::Job<ScanPreviewMade>>,
+}
+
+/// What a scan preview's worker made.
+pub struct ScanPreviewMade {
+    pub params: crate::core::scan_cleanup::ScanCleanupParams,
+    pub background: std::sync::Arc<crate::core::scan_cleanup::ScanBackground>,
+    pub tiles: crate::core::tile::TileMap,
 }
 
 pub struct DevelopPreviewState {
@@ -753,6 +766,8 @@ pub struct TextEditState {
     /// Paragraph type's box width (see `TextData::box_width`); `None`:
     /// point type.
     pub box_width: Option<f32>,
+    /// Its box height, when fixed (see `TextData::box_height`).
+    pub box_height: Option<f32>,
 }
 
 /// An in-progress drag of a Shape layer's on-canvas handle (resize / corner
@@ -1246,6 +1261,7 @@ impl App {
                 ui_cursor_icon: egui::CursorIcon::Default,
                 startup_focus_until: None,
                 window_occluded: false,
+                window_covered: false,
                 text_input_quiet_until: None,
                 develop_window: None,
                 retiring_develop_window: None,
@@ -1364,6 +1380,8 @@ impl App {
                 clipboard_source_ppi: None,
                 clipboard_image_new_doc_hint: None,
                 os_clipboard_written: None,
+                os_clipboard_seq: None,
+                os_clipboard_job: None,
                 #[cfg(feature = "pro")]
                 pending_ext_clipboard: None,
                 pending_opacity_cmd: None,
@@ -1479,6 +1497,8 @@ impl App {
                 display_bake_next: None,
                 select_subject: crate::core::select_subject::SelectSubjectEngine::new(),
                 repair_ai: None,
+                smart_fill: None,
+                scan_clean_pages: None,
                 #[cfg(feature = "pro")]
                 ai_engine: crate::core::ai::edit::AiEditEngine::new(),
                 #[cfg(feature = "pro")]
@@ -1705,7 +1725,7 @@ impl App {
                 #[cfg(feature = "pro")]
                 agent_link_error: None,
                 #[cfg(feature = "pro")]
-                agent_skills: None,
+                agent_skills: Default::default(),
                 #[cfg(feature = "pro")]
                 errands: Default::default(),
                 #[cfg(feature = "pro")]

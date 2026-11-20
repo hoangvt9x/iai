@@ -261,10 +261,10 @@ pub fn gaussian_blur_rgba(src: &[u8], w: u32, h: u32, sigma: f32) -> Vec<u8> {
         .for_each(|(o, p)| {
             let a = p[3];
             if a > 0.0001 {
-                o[0] = ((p[0] / a) * 255.0).round().clamp(0.0, 255.0) as u8;
-                o[1] = ((p[1] / a) * 255.0).round().clamp(0.0, 255.0) as u8;
-                o[2] = ((p[2] / a) * 255.0).round().clamp(0.0, 255.0) as u8;
-                o[3] = (a * 255.0).round().clamp(0.0, 255.0) as u8;
+                o[0] = iai_raster::fast_math::round_u8((p[0] / a) * 255.0);
+                o[1] = iai_raster::fast_math::round_u8((p[1] / a) * 255.0);
+                o[2] = iai_raster::fast_math::round_u8((p[2] / a) * 255.0);
+                o[3] = iai_raster::fast_math::round_u8(a * 255.0);
             } else {
                 o[0] = 0;
                 o[1] = 0;
@@ -326,7 +326,7 @@ pub fn unsharp_mask(src: &[u8], w: u32, h: u32, radius: f32, amount: f32) -> Vec
             for c in 0..3 {
                 let orig = s[c] as f32;
                 let blur = b[c] as f32;
-                o[c] = (orig + amount * (orig - blur)).round().clamp(0.0, 255.0) as u8;
+                o[c] = iai_raster::fast_math::round_u8(orig + amount * (orig - blur));
             }
             o[3] = s[3];
         });
@@ -343,7 +343,7 @@ pub fn high_pass(src: &[u8], w: u32, h: u32, radius: f32) -> Vec<u8> {
             for c in 0..3 {
                 let orig = s[c] as f32;
                 let blur = b[c] as f32;
-                o[c] = (orig - blur + 128.0).round().clamp(0.0, 255.0) as u8;
+                o[c] = iai_raster::fast_math::round_u8(orig - blur + 128.0);
             }
             o[3] = s[3];
         });
@@ -379,12 +379,12 @@ pub fn add_noise(src: &[u8], w: u32, h: u32, amount: f32, monochromatic: bool) -
         if monochromatic {
             let n = (noise_hash(x, y, 0) - 0.5) * 2.0 * mag;
             for c in 0..3 {
-                o[c] = (o[c] as f32 + n).round().clamp(0.0, 255.0) as u8;
+                o[c] = iai_raster::fast_math::round_u8(o[c] as f32 + n);
             }
         } else {
             for c in 0..3 {
                 let n = (noise_hash(x, y, c as u32) - 0.5) * 2.0 * mag;
-                o[c] = (o[c] as f32 + n).round().clamp(0.0, 255.0) as u8;
+                o[c] = iai_raster::fast_math::round_u8(o[c] as f32 + n);
             }
         }
     });
@@ -463,7 +463,7 @@ pub fn reduce_noise(src: &[u8], w: u32, h: u32, strength: f32) -> Vec<u8> {
                 let edge = ((orig - blur).abs() / threshold).min(1.0);
                 let w_blur = s * (1.0 - edge);
                 let v = orig * (1.0 - w_blur) + blur * w_blur;
-                o[c] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                o[c] = iai_raster::fast_math::round_u8(v * 255.0);
             }
             o[3] = sp[3];
         });

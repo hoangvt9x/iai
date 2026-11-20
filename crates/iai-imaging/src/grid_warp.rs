@@ -259,9 +259,9 @@ fn sample(src: &Source<'_>, x: f32, y: f32) -> [u8; 4] {
         return [0; 4];
     }
     [
-        (acc[0] / a).round().clamp(0.0, 255.0) as u8,
-        (acc[1] / a).round().clamp(0.0, 255.0) as u8,
-        (acc[2] / a).round().clamp(0.0, 255.0) as u8,
+        iai_raster::fast_math::round_u8(acc[0] / a),
+        iai_raster::fast_math::round_u8(acc[1] / a),
+        iai_raster::fast_math::round_u8(acc[2] / a),
         a.round().clamp(0.0, 255.0) as u8,
     ]
 }

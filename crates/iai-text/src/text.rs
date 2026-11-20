@@ -287,6 +287,24 @@ fn font_path_for_family(family: &TextFontFamily) -> Option<PathBuf> {
 /// The file of `family` and the face's number in it (a collection holds
 /// several).
 fn font_face_for_family(family: &TextFontFamily) -> Option<(PathBuf, u32)> {
+    // Asked at every drawing of a text (file checks on disk and a pass over
+    // every installed face): kept per family once found (20/11). A family not
+    // found is asked again, it may be installed meanwhile.
+    type Found = HashMap<String, (PathBuf, u32)>;
+    static FOUND: OnceLock<Mutex<Found>> = OnceLock::new();
+    let key = family.storage_name();
+    let found = FOUND.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = found.lock().ok().and_then(|f| f.get(&key).cloned()) {
+        return Some(hit);
+    }
+    let face = find_font_face(family)?;
+    if let Ok(mut f) = found.lock() {
+        f.insert(key, face.clone());
+    }
+    Some(face)
+}
+
+fn find_font_face(family: &TextFontFamily) -> Option<(PathBuf, u32)> {
     builtin_candidates(family)
         .iter()
         .map(PathBuf::from)
@@ -669,6 +687,8 @@ struct LaidLine {
 }
 
 struct TextLayout {
+    /// Lines that did not fit a paragraph box's height were left out.
+    overset: bool,
     glyphs: Vec<LaidGlyph>,
     lines: Vec<LaidLine>,
     width: u32,
@@ -932,12 +952,32 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
         }
     }
 
+    // A box of fixed height: the lines past its bottom are not drawn
+    // (the first always is), and the raster is the box's height.
+    let box_height = box_width
+        .and(td.box_height)
+        .filter(|h| h.is_finite() && *h >= 1.0);
+    let mut overset = false;
+    if let Some(box_h) = box_height
+        && let Some(cut) = lines
+            .iter()
+            .skip(1)
+            .position(|l| l.top + l.height > box_h + 0.5)
+            .map(|i| i + 1)
+    {
+        overset = true;
+        glyphs.truncate(lines[cut].glyph0);
+        lines.truncate(cut);
+    }
     let width_f = (max_w + pad * 2.0 + italic_extra + bold_extra)
         .ceil()
         .max(1.0);
-    let height_f = (baseline - last_descent + pad + underline_extra)
-        .ceil()
-        .max(1.0);
+    let height_f = match box_height {
+        Some(box_h) => (box_h + pad + underline_extra).ceil().max(1.0),
+        None => (baseline - last_descent + pad + underline_extra)
+            .ceil()
+            .max(1.0),
+    };
     if !width_f.is_finite()
         || !height_f.is_finite()
         || width_f > u32::MAX as f32
@@ -947,6 +987,7 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
     }
 
     Some(TextLayout {
+        overset,
         glyphs,
         lines,
         width: width_f as u32,
@@ -1621,6 +1662,86 @@ pub fn scale_letters(td: &mut TextData, k: f32) {
     if let Some(w) = td.box_width.as_mut() {
         *w *= k;
     }
+    if let Some(h) = td.box_height.as_mut() {
+        *h *= k;
+    }
+}
+
+/// Whether a paragraph box of fixed height leaves lines out (Photoshop's
+/// overset text, shown by a mark on the box).
+pub fn text_overset(td: &TextData) -> bool {
+    td.box_height.is_some() && layout_text(td).is_some_and(|l| l.overset)
+}
+
+/// Photoshop's "Convert to Point Text": the box goes and every line of it
+/// ends where it ended in the box, with a new-line character (a wrap after
+/// a space gives that space up to it). `None` when `td` is not paragraph
+/// type or has no font.
+pub fn to_point_type(td: &TextData) -> Option<TextData> {
+    td.box_width.filter(|w| w.is_finite() && *w >= 1.0)?;
+    if td.path.is_some() {
+        return None;
+    }
+    let whole = TextData {
+        box_height: None,
+        ..td.clone()
+    };
+    let layout = layout_text(&whole)?;
+    let (chars, src_of) = normalize_nfc_with_style_src(&td.content);
+    let mut text: Vec<char> = td.content.chars().collect();
+    let mut styles = td.glyph_styles.clone();
+    let styled = styles.len() == text.len();
+    // Where each wrap put the next line, in the typed text, last first so
+    // the earlier places stay where they are.
+    let mut breaks: Vec<usize> = layout
+        .lines
+        .windows(2)
+        .filter(|w| w[0].soft)
+        .filter_map(|w| {
+            let at = w[1].start_char;
+            (at > 0 && at < chars.len()).then(|| src_of.get(at).copied())?
+        })
+        .collect();
+    breaks.sort_unstable();
+    breaks.dedup();
+    for &at in breaks.iter().rev() {
+        if at == 0 || at > text.len() {
+            continue;
+        }
+        if text[at - 1].is_whitespace() && text[at - 1] != '\n' {
+            text[at - 1] = '\n';
+        } else {
+            text.insert(at, '\n');
+            if styled {
+                let style = styles[at - 1].clone();
+                styles.insert(at, style);
+            }
+        }
+    }
+    let mut out = td.clone();
+    out.content = text.into_iter().collect();
+    out.glyph_styles = if styled {
+        styles
+    } else {
+        td.glyph_styles.clone()
+    };
+    out.box_width = None;
+    out.box_height = None;
+    Some(out)
+}
+
+/// Photoshop's "Convert to Paragraph Text": a box just as wide as the
+/// widest line, so no line wraps anew. `None` when `td` already has a box,
+/// is set along a path, or has no font.
+pub fn to_paragraph_type(td: &TextData) -> Option<TextData> {
+    if td.box_width.is_some_and(|w| w.is_finite() && w >= 1.0) || td.path.is_some() {
+        return None;
+    }
+    let layout = layout_text(td)?;
+    let widest = layout.lines.iter().map(|l| l.width).fold(0.0_f32, f32::max);
+    let mut out = td.clone();
+    out.box_width = Some(widest.ceil().max(1.0));
+    Some(out)
 }
 
 /// The words of each line as laid out: a paragraph box's wrapped lines one
@@ -1654,7 +1775,11 @@ pub fn box_in_raster(td: &TextData) -> Option<(f32, f32, f32, f32)> {
     }
     let layout = layout_text(td)?;
     let (left, _) = anchor_in_raster(td)?;
-    Some((left, 0.0, box_width, layout.height as f32))
+    let box_height = td
+        .box_height
+        .filter(|h| h.is_finite() && *h >= 1.0)
+        .unwrap_or(layout.height as f32);
+    Some((left, 0.0, box_width, box_height))
 }
 
 pub fn rasterize_placed(td: &TextData) -> Option<(Rasterized, (i32, i32))> {
@@ -2969,6 +3094,98 @@ mod tests {
         assert!((h.x - p.x).abs() < 0.5, "{} vs {}", h.x, p.x);
         assert!(((h.x + h.w) - (p.x + p.w) - 1.0).abs() < 0.5);
         assert!((h.y - p.y).abs() < 0.5 && (h.h - p.h).abs() < 0.5);
+    }
+
+    /// A box of fixed height hides the lines past its bottom and says so;
+    /// its raster is the box's height.
+    #[test]
+    fn a_box_of_fixed_height_hides_the_lines_past_it() {
+        let para = TextData {
+            content: "một hai ba bốn năm sáu bảy tám chín mười".to_string(),
+            font_family: TextFontFamily::Arial,
+            font_px: 30.0,
+            box_width: Some(140.0),
+            ..TextData::default()
+        };
+        if rasterize_placed(&para).is_none() {
+            return; // no font in this environment
+        }
+        let all = super::laid_lines(&para);
+        assert!(all.len() >= 4, "{all:?}");
+        assert!(!super::text_overset(&para));
+        let short = TextData {
+            box_height: Some(75.0),
+            ..para.clone()
+        };
+        let shown = super::laid_lines(&short);
+        assert!(shown.len() < all.len() && !shown.is_empty(), "{shown:?}");
+        assert_eq!(shown[..], all[..shown.len()]);
+        assert!(super::text_overset(&short));
+        let (_, _, _, h) = super::box_in_raster(&short).expect("a box");
+        assert_eq!(h, 75.0);
+        // Tall enough: everything shows.
+        let tall = TextData {
+            box_height: Some(2000.0),
+            ..para.clone()
+        };
+        assert_eq!(super::laid_lines(&tall), all);
+        assert!(!super::text_overset(&tall));
+        // As point type every line is there again.
+        let point = super::to_point_type(&short).expect("paragraph type");
+        assert_eq!(super::laid_lines(&point), all);
+        assert_eq!(point.box_height, None);
+    }
+
+    /// Paragraph type to point type and back keeps every line where it was.
+    #[test]
+    fn point_and_paragraph_type_convert_without_moving_a_line() {
+        let para = TextData {
+            content: "một hai ba bốn năm sáu bảy tám".to_string(),
+            font_family: TextFontFamily::Arial,
+            font_px: 30.0,
+            box_width: Some(140.0),
+            ..TextData::default()
+        };
+        if rasterize_placed(&para).is_none() {
+            return; // no font in this environment
+        }
+        let wrapped = super::laid_lines(&para);
+        assert!(wrapped.len() > 2, "{wrapped:?}");
+        let point = super::to_point_type(&para).expect("paragraph type");
+        assert_eq!(point.box_width, None);
+        assert_eq!(super::laid_lines(&point), wrapped);
+        assert_eq!(point.content.lines().count(), wrapped.len());
+        assert!(super::to_point_type(&point).is_none());
+        let back = super::to_paragraph_type(&point).expect("point type");
+        assert_eq!(super::laid_lines(&back), wrapped);
+        assert!(super::to_paragraph_type(&back).is_none());
+        // A letter's own style stays on that letter.
+        let mut styled = para.clone();
+        styled.glyph_styles = styled
+            .content
+            .chars()
+            .enumerate()
+            .map(|(i, _)| super::GlyphStyle {
+                color: para.color,
+                font_px: if i == 5 { 40.0 } else { 30.0 },
+                font_family: para.font_family.clone(),
+                bold: false,
+                italic: false,
+                underline: false,
+                tracking_px: None,
+                line_height: None,
+            })
+            .collect();
+        let point = super::to_point_type(&styled).expect("paragraph type");
+        assert_eq!(point.glyph_styles.len(), point.content.chars().count());
+        let big: Vec<char> = point
+            .content
+            .chars()
+            .zip(&point.glyph_styles)
+            .filter(|(_, g)| g.font_px == 40.0)
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(big, vec![styled.content.chars().nth(5).unwrap()]);
     }
 
     #[test]

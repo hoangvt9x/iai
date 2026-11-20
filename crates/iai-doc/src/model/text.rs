@@ -217,6 +217,10 @@ pub struct TextData {
     /// canvas pixels before the stretch, and the alignment is within it.
     /// `None`: point type, a line ends only where a new line is typed.
     pub box_width: Option<f32>,
+    /// Paragraph type's box height, canvas pixels before the stretch: the
+    /// lines that do not fit are not drawn (Photoshop's overset text).
+    /// `None`: the box grows with its lines. Only with `box_width`.
+    pub box_height: Option<f32>,
 }
 
 /// A gradient across a text's letters: colours at shares of the way across
@@ -334,6 +338,7 @@ impl Default for TextData {
             path: None,
             fill: None,
             box_width: None,
+            box_height: None,
         }
     }
 }

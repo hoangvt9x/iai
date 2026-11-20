@@ -2,6 +2,17 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+20/11/2026
+- App mượt hơn ở nhiều chỗ hay dùng: kéo / nhả chuột với công cụ Move, bấm chọn chữ và hình, kéo ảnh nằm trong khung cắt, Ctrl+C cả ảnh, tô Gradient, đổi màu chữ, đóng tab, gộp layer (Flatten) — không còn khựng nửa giây đến một giây như trước.
+- Smart Fill (lấp vùng chọn, kể cả bằng AI) và «Làm sạch bản scan» cho nhiều trang PDF nay chạy ngầm: cửa sổ không còn đứng hình, làm việc khác trong lúc chờ được.
+- «Làm sạch bản scan»: kéo thanh trượt không còn khựng, ảnh xem trước tự hiện khi làm xong.
+- Mở «Việc nhanh» không còn khựng. Khi Gemini (Antigravity) làm việc trên iAi — đặt ảnh, đọc căn cước… — cửa sổ iAi vẫn chạy mượt trong lúc chờ.
+- Khi cửa sổ khác che kín iAi (Antigravity, Chrome phóng to…), iAi tạm thôi vẽ nên không còn bị đơ cả giây khi quay lại.
+- Clone Stamp và Smudge dùng cùng đầu cọ giống Photoshop như Cọ: cọ mềm tỏa mềm ra quá mép vòng tròn.
+- Chữ: không bôi đen mà bấm Alt + ← / → thì chỉnh khoảng cách giữa hai chữ cạnh con trỏ, như Photoshop.
+- Chữ: menu Text có thêm «Đổi thành chữ khung» và «Đổi thành chữ điểm», các dòng giữ nguyên chỗ.
+- Chữ: kéo khung chữ cao từ một dòng trở lên thì khung giữ chiều cao đó; chữ dài quá khung thì phần dư ẩn đi và góc khung có dấu cộng đỏ (như Photoshop). Kéo ô vuông ở cạnh dưới khung để đổi chiều cao.
+
 19/11/2026
 - Mở nhiều ảnh mà thanh tab không đủ chỗ: các tab cũ tự dời sang trái nhường chỗ cho ảnh mới mở, ảnh đang làm luôn hiện trên thanh. Chuyển qua lại giữa các tab đang thấy thì thanh đứng yên, không còn tab nào bị giấu vào nút mũi tên.
 - Lăn chuột trên thanh tab để kéo thanh qua trái / phải xem các tab khác. Nút mũi tên bên phải vẫn liệt kê mọi tab không hiện trên thanh.

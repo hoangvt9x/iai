@@ -119,7 +119,7 @@ pub struct UiShell {
     pub(in crate::app) agent_link_error: Option<String>,
     /// The skill library as the agent dialog shows it, and when it was read.
     #[cfg(feature = "pro")]
-    pub(in crate::app) agent_skills: Option<(std::time::Instant, Vec<crate::ui::SkillRow>)>,
+    pub(in crate::app) agent_skills: crate::app::jobs::ReadAgain<Vec<crate::ui::SkillRow>>,
     /// "Nhờ AI làm": errands for Gemini in Antigravity.
     #[cfg(feature = "pro")]
     pub(in crate::app) errands: crate::app::errands::Errands,

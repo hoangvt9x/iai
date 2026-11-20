@@ -739,6 +739,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(true) => {
                 self.win.window_focused = true;
+                self.win.window_covered = false;
                 // A model dropped into its folder meanwhile shows.
                 if self.shell.ui.support_dialog == Some(crate::ui::SupportDialog::Models) {
                     self.models_window_shown();
@@ -1311,6 +1312,8 @@ impl ApplicationHandler for App {
             || self.jobs.select_subject.is_busy()
             || self.engine_busy()
             || self.jobs.repair_ai.is_some()
+            || self.jobs.smart_fill.is_some()
+            || self.jobs.scan_clean_pages.is_some()
             || self.ai_api_running()
             || lama_downloading
             || self.jobs.pending_file_dialog.is_some()
@@ -1416,7 +1419,23 @@ impl ApplicationHandler for App {
         // fallback because Windows can keep the restored client size while the
         // window is iconic. Without this check a stale egui repaint deadline
         // leaves ControlFlow::Poll spinning a full UI-thread core while hidden.
-        let main_window_hidden = self.win.window_occluded
+        // Covered by other programs' windows, asked only while another has
+        // the focus. Uncovered, it draws what changed meanwhile.
+        let covered = !self.win.window_focused
+            && self
+                .win
+                .window
+                .as_ref()
+                .is_some_and(|window| crate::app::cursor::covered_by_others(window));
+        if std::mem::replace(&mut self.win.window_covered, covered) && !covered {
+            self.win.egui_repaint_deadline = None;
+            self.win.surface_retry_at = None;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        }
+        let main_window_hidden = covered
+            || self.win.window_occluded
             || self
                 .win
                 .window
@@ -1439,6 +1458,8 @@ impl ApplicationHandler for App {
                 || self.jobs.select_subject.is_busy()
                 || self.engine_busy()
                 || self.jobs.repair_ai.is_some()
+                || self.jobs.smart_fill.is_some()
+                || self.jobs.scan_clean_pages.is_some()
                 || self.ai_api_running()
                 || crate::core::lama::is_downloading()
                 || self
@@ -1459,6 +1480,12 @@ impl ApplicationHandler for App {
                 }
                 event_loop.set_control_flow(ControlFlow::WaitUntil(
                     std::time::Instant::now() + std::time::Duration::from_millis(100),
+                ));
+            } else if covered {
+                // Nothing says when the window in front moves away: look
+                // again shortly.
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    std::time::Instant::now() + std::time::Duration::from_millis(500),
                 ));
             } else {
                 // Ignore stale egui/selection animation deadlines. Keeping Poll
@@ -1483,6 +1510,8 @@ impl ApplicationHandler for App {
             || self.jobs.select_subject.is_busy()
             || self.engine_busy()
             || self.jobs.repair_ai.is_some()
+            || self.jobs.smart_fill.is_some()
+            || self.jobs.scan_clean_pages.is_some()
             || self.ai_api_running()
             || crate::core::lama::is_downloading()
             || self.win.pending_view_change

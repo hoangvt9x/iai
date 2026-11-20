@@ -200,6 +200,10 @@ pub struct BackgroundJobs {
     pub(in crate::app) select_subject: crate::core::select_subject::SelectSubjectEngine,
     /// Smart Repair stroke being rebuilt by the AI inpainter off the UI thread.
     pub(in crate::app) repair_ai: Option<RepairAiJob>,
+    /// An AI Smart Fill running on a worker (seconds on a CPU).
+    pub(in crate::app) smart_fill: Option<SmartFillJob>,
+    /// The pages of a multi-page "Làm sạch bản scan" not open yet.
+    pub(in crate::app) scan_clean_pages: Option<crate::app::scan_cleanup_ops::ScanCleanPagesJob>,
     /// Gemini AI image-edit engine (see core/ai/edit.rs).
     #[cfg(feature = "pro")]
     pub(in crate::app) ai_engine: crate::core::ai::edit::AiEditEngine,
@@ -469,6 +473,15 @@ pub(in crate::app) struct RepairAiJob {
     pub(in crate::app) work: crate::core::canvas::SpotHealWork,
     pub(in crate::app) overlay: Option<std::sync::Arc<crate::ui::CloneSourcePreview>>,
     pub(in crate::app) handle: std::thread::JoinHandle<Option<Vec<u8>>>,
+}
+
+/// An AI Smart Fill on a worker; `poll_smart_fill` commits it to the
+/// document it was started on.
+pub(in crate::app) struct SmartFillJob {
+    pub(in crate::app) doc_id: crate::core::document::DocumentId,
+    pub(in crate::app) handle: std::thread::JoinHandle<Option<crate::core::canvas::SmartFillWork>>,
+    /// Asked for AI but the model is not there: said in the status line.
+    pub(in crate::app) classic_note: Option<String>,
 }
 
 /// A foreground RAW decode (see `BackgroundJobs::raw_decode_jobs`).

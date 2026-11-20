@@ -191,6 +191,8 @@ pub struct ToolViewModel {
     pub text_path: Option<crate::core::text::TextPath>,
     /// The edited text's paragraph box width (see `TextData::box_width`).
     pub text_box_width: Option<f32>,
+    /// Its box height, when fixed (see `TextData::box_height`).
+    pub text_box_height: Option<f32>,
     /// A paragraph box being dragged out with the Type tool: its screen
     /// rectangle, min and max corners.
     pub text_box_drag: Option<[f32; 4]>,
@@ -1423,6 +1425,7 @@ impl Default for UiData {
                 text_flip_y: false,
                 text_path: None,
                 text_box_width: None,
+                text_box_height: None,
                 text_box_drag: None,
                 text_glyph_styles: std::sync::Arc::new(Vec::new()),
                 text_selection: None,

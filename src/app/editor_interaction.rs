@@ -68,6 +68,15 @@ pub struct EditorInteraction {
     /// the OS clipboard against this: a mismatch means another app copied
     /// something newer, which then wins over the internal layer clipboard.
     pub(in crate::app) os_clipboard_written: Option<u64>,
+    /// The clipboard's sequence number right after iai's own write (see
+    /// `os_clipboard::sequence_number`): while it is unchanged a paste need
+    /// not read the image back to know it is iai's.
+    pub(in crate::app) os_clipboard_seq: Option<u32>,
+    /// A copy's write to the OS clipboard still running on a worker: it
+    /// encodes the image and reads it back, 0.2-0.8 s for a whole photo,
+    /// which was a stall at every Ctrl+C (20/11). Gives the hash and the
+    /// sequence number above.
+    pub(in crate::app) os_clipboard_job: Option<std::sync::mpsc::Receiver<OsClipboardWrite>>,
     /// A browser "Copy image" edit that is waiting for the site to finish writing
     /// the result to the OS clipboard. A worker polls the clipboard (a read can
     /// block while the browser renders the image) until it holds an image
@@ -242,3 +251,7 @@ pub(in crate::app) struct PaintStrokeStats {
     pub busy: std::time::Duration,
     pub worst: std::time::Duration,
 }
+
+/// What a copy's write to the OS clipboard came to: the hash of the image as
+/// read back, and the clipboard's sequence number after it.
+pub(in crate::app) type OsClipboardWrite = Option<(u64, Option<u32>)>;

@@ -627,7 +627,7 @@ impl Canvas {
                     continue;
                 }
                 let i = ((y * fill_w + x) * 4) as usize;
-                let new_a = (region[i + 3] as f32 * (1.0 - sel_a)).round() as u8;
+                let new_a = iai_raster::fast_math::round_u8(region[i + 3] as f32 * (1.0 - sel_a));
                 region[i + 3] = new_a;
                 if new_a == 0 {
                     region[i] = 0;
@@ -756,7 +756,7 @@ impl Canvas {
                     continue;
                 }
                 let (r, g, b, a) = tiles.get_pixel(lx as u32, ly as u32);
-                let na = (a as f32 * keep).round() as u8;
+                let na = iai_raster::fast_math::round_u8(a as f32 * keep);
                 if na == 0 {
                     tiles.set_pixel(lx as u32, ly as u32, 0, 0, 0, 0);
                 } else {
@@ -777,9 +777,9 @@ impl Canvas {
                     continue;
                 }
                 let blend = |s: u8, d: u8| -> u8 {
-                    ((s as f32 * la + d as f32 * da * (1.0 - la)) / out_a)
-                        .round()
-                        .clamp(0.0, 255.0) as u8
+                    iai_raster::fast_math::round_u8(
+                        (s as f32 * la + d as f32 * da * (1.0 - la)) / out_a,
+                    )
                 };
                 tiles.set_pixel(
                     lx as u32,
@@ -787,7 +787,7 @@ impl Canvas {
                     blend(r, dr),
                     blend(g, dg),
                     blend(b, db),
-                    (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+                    iai_raster::fast_math::round_u8(out_a * 255.0),
                 );
             }
         }

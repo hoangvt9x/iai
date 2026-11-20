@@ -57,7 +57,7 @@ pub fn apply_output_sharpen(rgba: &mut [u8], width: usize, height: usize, amount
         }
         for c in 0..3 {
             let v = rgba[i * 4 + c] as f32 / 255.0 + delta;
-            rgba[i * 4 + c] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[i * 4 + c] = iai_raster::fast_math::round_u8(v.clamp(0.0, 1.0) * 255.0);
         }
     }
 }
@@ -139,7 +139,7 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 let t = ((x as f32 - 14.0) / 4.0).clamp(0.0, 1.0);
-                let v = (40.0 + t * (215.0 - 40.0)).round() as u8;
+                let v = iai_raster::fast_math::round_u8(40.0 + t * (215.0 - 40.0));
                 let i = (y * w + x) * 4;
                 soft[i] = v;
                 soft[i + 1] = v;

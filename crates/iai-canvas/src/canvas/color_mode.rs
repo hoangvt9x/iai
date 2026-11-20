@@ -82,7 +82,10 @@ impl Canvas {
             Self::pixel_count(self.width, self.height).and_then(|n| usize::try_from(n).ok())?;
         let mut cover = vec![0.0f32; pixels];
         let mut ink = self.composite_ink(|id| only.contains(&id), Some(&mut cover))?;
-        let alpha: Vec<u8> = cover.iter().map(|&c| (c * 255.0).round() as u8).collect();
+        let alpha: Vec<u8> = cover
+            .iter()
+            .map(|&c| iai_raster::fast_math::round_u8(c * 255.0))
+            .collect();
         // Composited over no ink, the planes hold ink × coverage: what shows
         // where they cover is that over the coverage.
         for (px, &c) in ink.chunks_exact_mut(4).zip(&cover) {
@@ -159,8 +162,9 @@ impl Canvas {
                     let at = (cy as u64 * self.width as u64 + cx as u64) as usize;
                     let o = at * 4;
                     for c in 0..4 {
-                        out[o + c] = (ink[i + c] as f32 * eff + out[o + c] as f32 * (1.0 - eff))
-                            .round() as u8;
+                        out[o + c] = iai_raster::fast_math::round_u8(
+                            ink[i + c] as f32 * eff + out[o + c] as f32 * (1.0 - eff),
+                        );
                     }
                     if let Some(cover) = cover.as_deref_mut()
                         && let Some(c) = cover.get_mut(at)
@@ -251,7 +255,7 @@ impl Canvas {
         Some(
             density
                 .into_iter()
-                .map(|v| ((1.0 - v.clamp(0.0, 1.0)) * 255.0).round() as u8)
+                .map(|v| iai_raster::fast_math::round_u8((1.0 - v.clamp(0.0, 1.0)) * 255.0))
                 .collect(),
         )
     }
@@ -414,7 +418,7 @@ impl Canvas {
                     px[2] as f32 / 255.0,
                 )
                 .clamp(0.0, 1.0);
-                let g = (l * 255.0).round() as u8;
+                let g = iai_raster::fast_math::round_u8(l * 255.0);
                 px[0] = g;
                 px[1] = g;
                 px[2] = g;

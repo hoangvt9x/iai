@@ -384,7 +384,7 @@ impl WarpMesh {
         let data = self
             .frozen
             .iter()
-            .map(|&f| (f.clamp(0.0, 1.0) * 255.0).round() as u8)
+            .map(|&f| iai_raster::fast_math::round_u8(f.clamp(0.0, 1.0) * 255.0))
             .collect();
         Some((self.gw, self.gh, data))
     }
@@ -560,7 +560,7 @@ fn sample_bilinear(src: &[u8], w: usize, h: usize, x: f32, y: f32) -> [u8; 4] {
     for c in 0..4 {
         let top = p(x0, y0, c) + (p(x1, y0, c) - p(x0, y0, c)) * wx;
         let bot = p(x0, y1, c) + (p(x1, y1, c) - p(x0, y1, c)) * wx;
-        out[c] = (top + (bot - top) * wy).round().clamp(0.0, 255.0) as u8;
+        out[c] = iai_raster::fast_math::round_u8(top + (bot - top) * wy);
     }
     out
 }

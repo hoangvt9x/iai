@@ -1899,6 +1899,9 @@ fn text_to_json(td: &iai_text::text::TextData) -> serde_json::Value {
     if let (Some(fill), Some(o)) = (fill, obj.as_object_mut()) {
         o.insert("fill".into(), fill);
     }
+    if let Some(h) = td.box_height {
+        obj["box_height"] = h.into();
+    }
     if let Some(w) = td.box_width {
         obj["box_width"] = w.into();
     }
@@ -2069,6 +2072,10 @@ fn json_to_text_data(v: &serde_json::Value) -> Option<iai_text::text::TextData> 
             .as_f64()
             .map(|w| w as f32)
             .filter(|w| w.is_finite() && *w >= 1.0),
+        box_height: v["box_height"]
+            .as_f64()
+            .map(|h| h as f32)
+            .filter(|h| h.is_finite() && *h >= 1.0),
     })
 }
 
@@ -3888,9 +3895,11 @@ mod tests {
             td.content.chars().count()
         ];
         td.box_width = Some(250.0);
+        td.box_height = Some(90.0);
 
         let json = text_to_json(&td);
         let restored = json_to_text_data(&json).expect("text json restores");
+        assert_eq!(restored.box_height, Some(90.0));
 
         assert!((restored.rotation_deg - 37.5).abs() < 0.001);
         assert_eq!(restored.font_family, td.font_family);

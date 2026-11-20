@@ -259,7 +259,7 @@ fn decontaminate_layer(
                     let v16 = (cur[c] as f32 * (1.0 - mix) + fg * mix)
                         .round()
                         .clamp(0.0, 65535.0);
-                    tile.pixels[i + c] = (v16 / 257.0).round() as u8;
+                    tile.pixels[i + c] = iai_raster::fast_math::round_u8(v16 / 257.0);
                     if let Some(p16) = tile.pixels16.as_mut() {
                         p16[i + c] = v16 as u16;
                     }

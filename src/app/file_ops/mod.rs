@@ -182,7 +182,10 @@ impl App {
             resolution_ppi: dpi,
             ..Default::default()
         };
-        self.docs.active_mut().canvas = Canvas::new(w, h);
+        // The canvas it replaces, with its undo steps, is freed off the
+        // window's thread (closing the last tab held a frame 0.33 s, 20/11).
+        let old = std::mem::replace(&mut self.docs.active_mut().canvas, Canvas::new(w, h));
+        crate::app::docmgr::drop_in_background(old);
         match bg {
             0 => {
                 self.docs.active_mut().canvas.layer_stack.layers[0].is_background = true;

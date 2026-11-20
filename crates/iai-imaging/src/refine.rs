@@ -125,7 +125,7 @@ impl RefineParams {
                 let t = 0.99 * -s;
                 a = ((a - t) / (1.0 - t)).max(0.0);
             }
-            *out = (a * 255.0).round() as u8;
+            *out = iai_raster::fast_math::round_u8(a * 255.0);
         }
         Some(lut)
     }
@@ -573,7 +573,7 @@ fn matte_region(
                     }
                     let a = smoothstep(0.04, 0.96, clean[(y - sub.y0) * sw + (x - sub.x0)]);
                     let v = b as f32 / 255.0 + (a - b as f32 / 255.0) * wv;
-                    out.push((v * 255.0).round().clamp(0.0, 255.0) as u8);
+                    out.push(iai_raster::fast_math::round_u8(v * 255.0));
                 }
             }
             Some((blk, out))
@@ -623,7 +623,7 @@ fn finish_region(matte: &[u8], w: usize, h: usize, p: &RefineParams, roi: Rect, 
                 let s = (0.5 + (*b as f32 / 255.0 - 0.5) * gain).clamp(0.0, 1.0);
                 let keep = smoothstep(0.35, 0.75, d as f32 / 255.0);
                 let v = s + (o as f32 / 255.0 - s) * keep;
-                *b = (v * 255.0).round() as u8;
+                *b = iai_raster::fast_math::round_u8(v * 255.0);
             });
     }
     if fr > 0 {

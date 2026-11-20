@@ -358,19 +358,53 @@ impl MoveTool {
     pub(crate) fn shape_box(layer: &crate::core::layer::Layer) -> Option<(f32, f32, f32, f32)> {
         use crate::core::layer::LayerType;
         use crate::core::vector::object::VectorGeometry;
-        let objects = match &layer.layer_type {
-            LayerType::Vector(VectorGeometry::Path(o)) => vec![o.clone()],
-            LayerType::Vector(VectorGeometry::Primitive(shape)) => {
-                vec![shape.to_vector_object(layer.offset)]
-            }
-            LayerType::Text(text) => crate::core::text::text_vector_objects(text, layer.offset),
-            _ => return None,
+        type Boxed = Option<(f32, f32, f32, f32)>;
+        let union = |boxes: &mut dyn Iterator<
+            Item = crate::core::vector::object::VectorObjectData,
+        >|
+         -> Boxed {
+            boxes
+                .filter_map(|o| o.layer_bounds(0.5))
+                .map(|b| (b.x, b.y, b.x + b.w, b.y + b.h))
+                .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
         };
-        objects
-            .iter()
-            .filter_map(|o| o.layer_bounds(0.5))
-            .map(|b| (b.x, b.y, b.x + b.w, b.y + b.h))
-            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
+        match &layer.layer_type {
+            LayerType::Vector(VectorGeometry::Path(o)) => o
+                .layer_bounds(0.5)
+                .map(|b| (b.x, b.y, b.x + b.w, b.y + b.h)),
+            LayerType::Vector(VectorGeometry::Primitive(shape)) => {
+                union(&mut std::iter::once(shape.to_vector_object(layer.offset)))
+            }
+            // Type is shaped letter by letter to find its outlines: 0.2-1.2 s
+            // on a long text, and this box is asked for on every pointer move
+            // with Move (20/11). Kept per layer until the text or its place
+            // changes.
+            LayerType::Text(text) => {
+                type Seen = Vec<(u32, (i32, i32), crate::core::text::TextData, Boxed)>;
+                thread_local! {
+                    static SEEN: std::cell::RefCell<Seen> = const { std::cell::RefCell::new(Vec::new()) };
+                }
+                SEEN.with(|seen| {
+                    let mut seen = seen.borrow_mut();
+                    if let Some(hit) = seen
+                        .iter()
+                        .find(|e| e.0 == layer.id && e.1 == layer.offset && e.2 == *text)
+                    {
+                        return hit.3;
+                    }
+                    let b = union(
+                        &mut crate::core::text::text_vector_objects(text, layer.offset).into_iter(),
+                    );
+                    seen.retain(|e| e.0 != layer.id);
+                    if seen.len() >= 64 {
+                        seen.remove(0);
+                    }
+                    seen.push((layer.id, layer.offset, text.clone(), b));
+                    b
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Canvas-space point `(x,y)` inside a layer's raster bounding box.

@@ -10,6 +10,7 @@ use crate::core::vector::style::{
     Gradient as VectorGradient, GradientKind, GradientStop as VectorGradientStop,
     MAX_GRADIENT_STOPS, Paint,
 };
+use rayon::prelude::*;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -335,122 +336,116 @@ impl GradientTool {
             && !lock_alpha
             && !matches!(self.blend_mode, GradientBlendMode::Clear);
 
-        for ty in ty0..ty1 {
-            for tx in tx0..tx1 {
-                let pos = TilePos {
-                    x: tx as i32,
-                    y: ty as i32,
-                };
-                let Some(tile) = (if lock_alpha {
-                    tiles.tiles.get_mut(&pos)
-                } else {
-                    Some(
-                        tiles
-                            .tiles
-                            .entry(pos)
-                            .or_insert_with(|| Arc::new(Tile::new_empty())),
-                    )
-                }) else {
-                    continue;
-                };
-                let tile = Arc::make_mut(tile);
-                tile.revision += 1;
+        if !lock_alpha {
+            for ty in ty0..ty1 {
+                for tx in tx0..tx1 {
+                    let pos = TilePos {
+                        x: tx as i32,
+                        y: ty as i32,
+                    };
+                    tiles
+                        .tiles
+                        .entry(pos)
+                        .or_insert_with(|| Arc::new(Tile::new_empty()));
+                }
+            }
+        }
+        // Every tile on its own core: one by one this was 0.2-0.5 s on the
+        // window's thread at each release on a large photo (20/11).
+        let mut work: Vec<(u32, u32, &mut Arc<Tile>)> = tiles
+            .tiles
+            .iter_mut()
+            .filter(|(pos, _)| {
+                (tx0 as i32..tx1 as i32).contains(&pos.x)
+                    && (ty0 as i32..ty1 as i32).contains(&pos.y)
+            })
+            .map(|(pos, tile)| (pos.x as u32, pos.y as u32, tile))
+            .collect();
+        // The colour converter of a CMYK document is not shared between
+        // threads: its tiles take turns with it.
+        let cmyk_lock = cmyk_conv.map(std::sync::Mutex::new);
+        work.par_iter_mut().for_each(|(tx, ty, tile)| {
+            let cmyk_guard = cmyk_lock.as_ref().and_then(|m| m.lock().ok());
+            let cmyk_conv = cmyk_guard.as_deref();
+            let (tx, ty) = (*tx, *ty);
+            let tile = Arc::make_mut(tile);
+            tile.revision += 1;
 
-                let tile_lx0 = (tx * TILE_SIZE).max(lx0);
-                let tile_ly0 = (ty * TILE_SIZE).max(ly0);
-                let tile_lx1 = ((tx + 1) * TILE_SIZE).min(lx1);
-                let tile_ly1 = ((ty + 1) * TILE_SIZE).min(ly1);
+            let tile_lx0 = (tx * TILE_SIZE).max(lx0);
+            let tile_ly0 = (ty * TILE_SIZE).max(ly0);
+            let tile_lx1 = ((tx + 1) * TILE_SIZE).min(lx1);
+            let tile_ly1 = ((ty + 1) * TILE_SIZE).min(ly1);
 
-                for layer_y in tile_ly0..tile_ly1 {
-                    let canvas_y = layer_y as i32 + oy;
-                    let py = canvas_y as f32 + 0.5 - sy;
-                    let row_base = ((layer_y - ty * TILE_SIZE) * TILE_SIZE * 4) as usize;
-                    for layer_x in tile_lx0..tile_lx1 {
-                        let canvas_x = layer_x as i32 + ox;
-                        let px = canvas_x as f32 + 0.5 - sx;
-                        let lut_idx = self.lut_index(px, py, dx, dy, len, len2, start_angle);
-                        let color = lut[lut_idx];
-                        let mut src_a = (color[3] as f32 / 255.0) * opacity;
-                        if let Some((mask, sw, sh, offset)) = selection_sample.as_ref() {
-                            let sx = canvas_x - offset.0;
-                            let sy = canvas_y - offset.1;
-                            if sx < 0 || sy < 0 || sx >= *sw as i32 || sy >= *sh as i32 {
-                                continue;
-                            }
-                            let mi = (sy as u32 * *sw + sx as u32) as usize;
-                            let Some(&m) = mask.get(mi) else {
-                                continue;
-                            };
-                            src_a *= m as f32 / 255.0;
-                        }
-                        if src_a < 0.001 {
+            for layer_y in tile_ly0..tile_ly1 {
+                let canvas_y = layer_y as i32 + oy;
+                let py = canvas_y as f32 + 0.5 - sy;
+                let row_base = ((layer_y - ty * TILE_SIZE) * TILE_SIZE * 4) as usize;
+                for layer_x in tile_lx0..tile_lx1 {
+                    let canvas_x = layer_x as i32 + ox;
+                    let px = canvas_x as f32 + 0.5 - sx;
+                    let lut_idx = self.lut_index(px, py, dx, dy, len, len2, start_angle);
+                    let color = lut[lut_idx];
+                    let mut src_a = (color[3] as f32 / 255.0) * opacity;
+                    if let Some((mask, sw, sh, offset)) = selection_sample.as_ref() {
+                        let sx = canvas_x - offset.0;
+                        let sy = canvas_y - offset.1;
+                        if sx < 0 || sy < 0 || sx >= *sw as i32 || sy >= *sh as i32 {
                             continue;
                         }
-
-                        let col = ((layer_x - tx * TILE_SIZE) * 4) as usize;
-                        let i = row_base + col;
-                        if lock_alpha && tile.pixels[i + 3] == 0 {
+                        let mi = (sy as u32 * *sw + sx as u32) as usize;
+                        let Some(&m) = mask.get(mi) else {
                             continue;
+                        };
+                        src_a *= m as f32 / 255.0;
+                    }
+                    if src_a < 0.001 {
+                        continue;
+                    }
+
+                    let col = ((layer_x - tx * TILE_SIZE) * 4) as usize;
+                    let i = row_base + col;
+                    if lock_alpha && tile.pixels[i + 3] == 0 {
+                        continue;
+                    }
+                    if let (Some(conv), Some(ilut)) = (cmyk_conv.as_ref(), ink_lut.as_ref()) {
+                        if tile.ink.is_none() {
+                            tile.ink = Some(vec![0u8; crate::core::tile::TILE_BYTES]);
                         }
-                        if let (Some(conv), Some(ilut)) = (cmyk_conv.as_ref(), ink_lut.as_ref()) {
-                            if tile.ink.is_none() {
-                                tile.ink = Some(vec![0u8; crate::core::tile::TILE_BYTES]);
-                            }
-                            let fink = ilut[lut_idx];
-                            let plane = tile.ink.as_mut().unwrap();
-                            if let Some(wm) = plate_gate {
-                                // Plate gradient: only enabled ink channels move.
-                                let mut ink = [plane[i], plane[i + 1], plane[i + 2], plane[i + 3]];
-                                for c in 0..4 {
-                                    if wm[c] {
-                                        let d = plane[i + c] as f32 / 255.0;
-                                        let s = fink[c] as f32 / 255.0;
-                                        let v = ((d + (s - d) * src_a) * 255.0).round() as u8;
-                                        plane[i + c] = v;
-                                        ink[c] = v;
-                                    }
-                                }
-                                let rgb = conv.cmyk_to_rgb_one(ink);
-                                tile.pixels[i] = rgb[0];
-                                tile.pixels[i + 1] = rgb[1];
-                                tile.pixels[i + 2] = rgb[2];
-                                continue;
-                            }
-                            let dst_a = tile.pixels[i + 3] as f32 / 255.0;
-                            if lock_alpha {
-                                if dst_a < 0.001 {
-                                    continue;
-                                }
-                                let w = src_a.min(dst_a) / dst_a;
-                                let mut ink = [0u8; 4];
-                                for c in 0..4 {
+                        let fink = ilut[lut_idx];
+                        let plane = tile.ink.as_mut().unwrap();
+                        if let Some(wm) = plate_gate {
+                            // Plate gradient: only enabled ink channels move.
+                            let mut ink = [plane[i], plane[i + 1], plane[i + 2], plane[i + 3]];
+                            for c in 0..4 {
+                                if wm[c] {
                                     let d = plane[i + c] as f32 / 255.0;
                                     let s = fink[c] as f32 / 255.0;
-                                    let v =
-                                        ((s * w + d * (1.0 - w)) * 255.0).round().clamp(0.0, 255.0)
-                                            as u8;
+                                    let v = crate::core::fast_math::round_u8(
+                                        (d + (s - d) * src_a) * 255.0,
+                                    );
                                     plane[i + c] = v;
                                     ink[c] = v;
                                 }
-                                let rgb = conv.cmyk_to_rgb_one(ink);
-                                tile.pixels[i] = rgb[0];
-                                tile.pixels[i + 1] = rgb[1];
-                                tile.pixels[i + 2] = rgb[2];
+                            }
+                            let rgb = conv.cmyk_to_rgb_one(ink);
+                            tile.pixels[i] = rgb[0];
+                            tile.pixels[i + 1] = rgb[1];
+                            tile.pixels[i + 2] = rgb[2];
+                            continue;
+                        }
+                        let dst_a = tile.pixels[i + 3] as f32 / 255.0;
+                        if lock_alpha {
+                            if dst_a < 0.001 {
                                 continue;
                             }
-                            let new_a = src_a + dst_a * (1.0 - src_a);
-                            if new_a < 0.001 {
-                                continue;
-                            }
-                            let dw = dst_a * (1.0 - src_a);
+                            let w = src_a.min(dst_a) / dst_a;
                             let mut ink = [0u8; 4];
                             for c in 0..4 {
                                 let d = plane[i + c] as f32 / 255.0;
                                 let s = fink[c] as f32 / 255.0;
-                                let v = (((s * src_a + d * dw) / new_a) * 255.0)
-                                    .round()
-                                    .clamp(0.0, 255.0)
-                                    as u8;
+                                let v = crate::core::fast_math::round_u8(
+                                    (s * w + d * (1.0 - w)) * 255.0,
+                                );
                                 plane[i + c] = v;
                                 ink[c] = v;
                             }
@@ -458,76 +453,92 @@ impl GradientTool {
                             tile.pixels[i] = rgb[0];
                             tile.pixels[i + 1] = rgb[1];
                             tile.pixels[i + 2] = rgb[2];
-                            tile.pixels[i + 3] = (new_a * 255.0).round() as u8;
                             continue;
                         }
-                        if let Some(wm) = channel_wm {
-                            let luma = crate::core::tile::luma_u8(color[0], color[1], color[2])
-                                as f32
-                                / 255.0;
-                            crate::core::tile::blend_masked(
-                                &mut tile.pixels[i..i + 4],
-                                [luma; 3],
-                                src_a,
-                                wm,
+                        let new_a = src_a + dst_a * (1.0 - src_a);
+                        if new_a < 0.001 {
+                            continue;
+                        }
+                        let dw = dst_a * (1.0 - src_a);
+                        let mut ink = [0u8; 4];
+                        for c in 0..4 {
+                            let d = plane[i + c] as f32 / 255.0;
+                            let s = fink[c] as f32 / 255.0;
+                            let v = crate::core::fast_math::round_u8(
+                                ((s * src_a + d * dw) / new_a) * 255.0,
                             );
-                            continue;
+                            plane[i + c] = v;
+                            ink[c] = v;
                         }
-                        if fast_replace {
-                            tile.pixels[i..i + 4].copy_from_slice(&color);
-                            continue;
-                        }
+                        let rgb = conv.cmyk_to_rgb_one(ink);
+                        tile.pixels[i] = rgb[0];
+                        tile.pixels[i + 1] = rgb[1];
+                        tile.pixels[i + 2] = rgb[2];
+                        tile.pixels[i + 3] = crate::core::fast_math::round_u8(new_a * 255.0);
+                        continue;
+                    }
+                    if let Some(wm) = channel_wm {
+                        let luma =
+                            crate::core::tile::luma_u8(color[0], color[1], color[2]) as f32 / 255.0;
+                        crate::core::tile::blend_masked(
+                            &mut tile.pixels[i..i + 4],
+                            [luma; 3],
+                            src_a,
+                            wm,
+                        );
+                        continue;
+                    }
+                    if fast_replace {
+                        tile.pixels[i..i + 4].copy_from_slice(&color);
+                        continue;
+                    }
 
-                        let dst_a = tile.pixels[i + 3] as f32 / 255.0;
-                        if lock_alpha {
-                            if dst_a < 0.001 {
-                                continue;
-                            }
-                            let w = src_a.min(dst_a) / dst_a;
-                            let src_r = color[0] as f32 / 255.0;
-                            let src_g = color[1] as f32 / 255.0;
-                            let src_b = color[2] as f32 / 255.0;
-                            let dst_r = tile.pixels[i] as f32 / 255.0;
-                            let dst_g = tile.pixels[i + 1] as f32 / 255.0;
-                            let dst_b = tile.pixels[i + 2] as f32 / 255.0;
-                            tile.pixels[i] = ((src_r * w + dst_r * (1.0 - w)) * 255.0)
-                                .round()
-                                .clamp(0.0, 255.0)
-                                as u8;
-                            tile.pixels[i + 1] = ((src_g * w + dst_g * (1.0 - w)) * 255.0)
-                                .round()
-                                .clamp(0.0, 255.0)
-                                as u8;
-                            tile.pixels[i + 2] = ((src_b * w + dst_b * (1.0 - w)) * 255.0)
-                                .round()
-                                .clamp(0.0, 255.0)
-                                as u8;
+                    let dst_a = tile.pixels[i + 3] as f32 / 255.0;
+                    if lock_alpha {
+                        if dst_a < 0.001 {
                             continue;
                         }
-                        let out_a = src_a + dst_a * (1.0 - src_a);
-                        if out_a <= 0.001 {
-                            continue;
-                        }
-
-                        let inv_src = 1.0 - src_a;
+                        let w = src_a.min(dst_a) / dst_a;
                         let src_r = color[0] as f32 / 255.0;
                         let src_g = color[1] as f32 / 255.0;
                         let src_b = color[2] as f32 / 255.0;
                         let dst_r = tile.pixels[i] as f32 / 255.0;
                         let dst_g = tile.pixels[i + 1] as f32 / 255.0;
                         let dst_b = tile.pixels[i + 2] as f32 / 255.0;
-
-                        tile.pixels[i] =
-                            ((src_r * src_a + dst_r * dst_a * inv_src) / out_a * 255.0) as u8;
-                        tile.pixels[i + 1] =
-                            ((src_g * src_a + dst_g * dst_a * inv_src) / out_a * 255.0) as u8;
-                        tile.pixels[i + 2] =
-                            ((src_b * src_a + dst_b * dst_a * inv_src) / out_a * 255.0) as u8;
-                        tile.pixels[i + 3] = (out_a * 255.0) as u8;
+                        tile.pixels[i] = crate::core::fast_math::round_u8(
+                            (src_r * w + dst_r * (1.0 - w)) * 255.0,
+                        );
+                        tile.pixels[i + 1] = crate::core::fast_math::round_u8(
+                            (src_g * w + dst_g * (1.0 - w)) * 255.0,
+                        );
+                        tile.pixels[i + 2] = crate::core::fast_math::round_u8(
+                            (src_b * w + dst_b * (1.0 - w)) * 255.0,
+                        );
+                        continue;
                     }
+                    let out_a = src_a + dst_a * (1.0 - src_a);
+                    if out_a <= 0.001 {
+                        continue;
+                    }
+
+                    let inv_src = 1.0 - src_a;
+                    let src_r = color[0] as f32 / 255.0;
+                    let src_g = color[1] as f32 / 255.0;
+                    let src_b = color[2] as f32 / 255.0;
+                    let dst_r = tile.pixels[i] as f32 / 255.0;
+                    let dst_g = tile.pixels[i + 1] as f32 / 255.0;
+                    let dst_b = tile.pixels[i + 2] as f32 / 255.0;
+
+                    tile.pixels[i] =
+                        ((src_r * src_a + dst_r * dst_a * inv_src) / out_a * 255.0) as u8;
+                    tile.pixels[i + 1] =
+                        ((src_g * src_a + dst_g * dst_a * inv_src) / out_a * 255.0) as u8;
+                    tile.pixels[i + 2] =
+                        ((src_b * src_a + dst_b * dst_a * inv_src) / out_a * 255.0) as u8;
+                    tile.pixels[i + 3] = (out_a * 255.0) as u8;
                 }
             }
-        }
+        });
 
         canvas.mark_dirty(0, 0, canvas_w, canvas_h);
         canvas.end_stroke();
@@ -729,7 +740,7 @@ impl GradientTool {
             }
         };
         let t = (if self.reverse { 1.0 - t } else { t }).clamp(0.0, 1.0);
-        (t * (GRADIENT_LUT_SIZE - 1) as f32).round() as usize
+        crate::core::fast_math::round_u16(t * (GRADIENT_LUT_SIZE - 1) as f32) as usize
     }
 }
 

@@ -1578,6 +1578,22 @@ fn text_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.run("vector.to_curves", serde_json::json!({}));
         ui.close();
     }
+    // Photoshop's Convert to Paragraph / Point Text; the engine says so when
+    // the layer is that kind already.
+    let active_text = data
+        .layers
+        .layer_types
+        .get(data.layers.active_layer_idx)
+        .is_some_and(|t| t == "Text");
+    for (label, to) in [
+        ("Đổi thành chữ khung", "paragraph"),
+        ("Đổi thành chữ điểm", "point"),
+    ] {
+        if ui.add(menu_item_enabled(label, "", active_text)).clicked() {
+            actions.run("text.convert", serde_json::json!({"to": to}));
+            ui.close();
+        }
+    }
     // Fit Text To Path: a picked type layer and a picked shape or path.
     let picked = |kind: &[&str]| {
         (0..data.layers.layer_count).any(|i| {

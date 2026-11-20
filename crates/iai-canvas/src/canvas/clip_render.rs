@@ -77,6 +77,7 @@ impl Canvas {
         // first so we never hold an immutable borrow (the frame) while mutating a
         // content layer.
         let mut baked: Vec<(usize, LayerMask)> = Vec::new();
+        let mut shifted: Vec<(usize, (i32, i32), (i32, i32))> = Vec::new();
         for (i, layer) in self.layer_stack.layers.iter().enumerate() {
             let Some(fid) = layer.clip_parent_id else {
                 continue;
@@ -89,71 +90,180 @@ impl Canvas {
             let Some(frame) = self.layer_stack.layers.iter().find(|l| l.id == fid) else {
                 continue;
             };
+            // Frame and content moved together (both picked, or a group
+            // dragged): the mask is the same pixels, only its place is new.
+            // Baking it again on every drag frame was the Move lag of 11/11.
+            if let Some(mask) = layer.mask.as_ref()
+                && mask_still_fits(mask, layer, frame)
+            {
+                shifted.push((i, layer.offset, frame.offset));
+                continue;
+            }
             baked.push((
                 i,
                 bake_clip_mask(frame, layer.offset, layer.width, layer.height),
             ));
         }
+        for (i, offset, frame_offset) in shifted {
+            if let Some(mask) = self.layer_stack.layers[i].mask.as_mut() {
+                mask.bake_offset = offset;
+                mask.bake_frame_offset = frame_offset;
+            }
+        }
         let any = !baked.is_empty();
         for (i, mask) in baked {
+            let layer = &self.layer_stack.layers[i];
+            if let Some(frame) = layer
+                .clip_parent_id
+                .and_then(|fid| self.layer_stack.layers.iter().find(|l| l.id == fid))
+            {
+                remember_bake(&mask, layer, frame);
+            }
             self.layer_stack.layers[i].mask = Some(mask);
         }
         any
     }
 }
 
+/// What a baked clip mask was made from: the frame's pixels and sizes, and
+/// where the content sat against the frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BakeSource {
+    frame_id: u32,
+    frame_tiles: u64,
+    frame_size: (u32, u32),
+    content_size: (u32, u32),
+    content_minus_frame: (i32, i32),
+}
+
+impl BakeSource {
+    fn of(content: &Layer, frame: &Layer) -> Self {
+        Self {
+            frame_id: frame.id,
+            frame_tiles: frame.tiles.revision_fingerprint(),
+            frame_size: (frame.width, frame.height),
+            content_size: (content.width, content.height),
+            content_minus_frame: (
+                content.offset.0 - frame.offset.0,
+                content.offset.1 - frame.offset.1,
+            ),
+        }
+    }
+}
+
+thread_local! {
+    /// Each baked mask (by its tiles' revisions, unique to one bake) and what
+    /// it was baked from.
+    static BAKES: std::cell::RefCell<Vec<(u64, BakeSource)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn remember_bake(mask: &LayerMask, content: &Layer, frame: &Layer) {
+    let key = mask.tiles.revision_fingerprint();
+    let source = BakeSource::of(content, frame);
+    BAKES.with(|b| {
+        let mut b = b.borrow_mut();
+        b.retain(|e| e.0 != key);
+        if b.len() >= 64 {
+            b.remove(0);
+        }
+        b.push((key, source));
+    });
+}
+
+/// Whether `mask` was baked from this very frame with the content in the same
+/// place against it, so baking again would give the same pixels.
+fn mask_still_fits(mask: &LayerMask, content: &Layer, frame: &Layer) -> bool {
+    if mask.width != content.width || mask.height != content.height || mask.inverted {
+        return false;
+    }
+    let key = mask.tiles.revision_fingerprint();
+    let source = BakeSource::of(content, frame);
+    BAKES.with(|b| b.borrow().iter().any(|e| e.0 == key && e.1 == source))
+}
+
 /// Build a layer-local mask whose value at `(lx, ly)` is the frame's coverage
 /// (alpha) at the same CANVAS position, so the content shows only inside the
 /// frame's shape. Areas outside the frame are hidden.
 fn bake_clip_mask(frame: &Layer, content_offset: (i32, i32), cw: u32, ch: u32) -> LayerMask {
+    use iai_raster::tile::{TILE_SIZE, Tile, TilePos, next_tile_revision};
+    use std::sync::Arc;
     let (fw, fh) = (frame.width, frame.height);
     let (fox, foy) = frame.offset;
+    let ts = TILE_SIZE as usize;
 
-    // Extract the frame's alpha once into a flat buffer so the (usually larger)
-    // content loop is plain array indexing rather than a tile lookup per pixel.
-    // Row-parallel: get_pixel is an immutable tile lookup, so rows are independent.
+    // The frame's alpha once, as a flat buffer, read tile row by tile row (a
+    // hash lookup per pixel was most of the bake).
     let mut frame_alpha = vec![0u8; (fw as usize) * (fh as usize)];
-    frame_alpha
-        .par_chunks_mut(fw as usize)
-        .enumerate()
-        .for_each(|(y, row)| {
-            let y = y as u32;
-            for x in 0..fw {
-                row[x as usize] = frame.tiles.get_pixel(x, y).3;
-            }
-        });
+    if fw > 0 {
+        frame_alpha
+            .par_chunks_mut(fw as usize)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let ty = (y / ts) as i32;
+                let r = y % ts;
+                for (tx, part) in row.chunks_mut(ts).enumerate() {
+                    let pos = TilePos {
+                        x: tx as i32,
+                        y: ty,
+                    };
+                    if let Some(tile) = frame.tiles.tiles.get(&pos) {
+                        let src = &tile.pixels[r * ts * 4..(r + 1) * ts * 4];
+                        for (o, px) in part.iter_mut().zip(src.chunks_exact(4)) {
+                            *o = px[3];
+                        }
+                    }
+                }
+            });
+    }
 
-    // Fill row-parallel: baking a full-image-sized mask on one thread was the
-    // ~2s stall before the next drag (CPU pinned at ~one core). Rows are
-    // independent and only READ the shared frame_alpha, so rayon splits it across
-    // all cores. Rows wholly outside the frame short-circuit to transparent.
-    let mut buf = vec![0u8; (cw as usize) * (ch as usize) * 4];
-    let row_bytes = (cw as usize) * 4;
-    buf.par_chunks_mut(row_bytes)
-        .enumerate()
-        .for_each(|(ly, row)| {
-            let fy = content_offset.1 + ly as i32 - foy;
-            if fy < 0 || (fy as u32) >= fh {
-                return; // outside the frame vertically → row stays transparent
+    // Each mask tile straight from that buffer, in parallel; inside the layer
+    // a pixel is (a, a, a, 255), past its edge (0, 0, 0, 0), as before.
+    let rev = next_tile_revision();
+    let (cols, rows) = (cw.div_ceil(TILE_SIZE), ch.div_ceil(TILE_SIZE));
+    let tiles: Vec<(TilePos, Tile)> = (0..rows * cols)
+        .into_par_iter()
+        .map(|k| {
+            let (tx, ty) = ((k % cols) as usize, (k / cols) as usize);
+            let mut tile = Tile::new_empty();
+            tile.revision = rev;
+            for r in 0..ts {
+                let ly = ty * ts + r;
+                if ly >= ch as usize {
+                    break;
+                }
+                let fy = content_offset.1 + ly as i32 - foy;
+                let frame_row = (fy >= 0 && (fy as u32) < fh).then(|| {
+                    &frame_alpha[fy as usize * fw as usize..(fy as usize + 1) * fw as usize]
+                });
+                let out = &mut tile.pixels[r * ts * 4..(r + 1) * ts * 4];
+                for c in 0..ts {
+                    let lx = tx * ts + c;
+                    if lx >= cw as usize {
+                        break;
+                    }
+                    let fx = content_offset.0 + lx as i32 - fox;
+                    let a = match frame_row {
+                        Some(row) if fx >= 0 && (fx as u32) < fw => row[fx as usize],
+                        _ => 0,
+                    };
+                    out[c * 4..c * 4 + 4].copy_from_slice(&[a, a, a, 255]);
+                }
             }
-            let frame_row = (fy as usize) * (fw as usize);
-            for lx in 0..cw as usize {
-                let fx = content_offset.0 + lx as i32 - fox;
-                let a = if fx >= 0 && (fx as u32) < fw {
-                    frame_alpha[frame_row + fx as usize]
-                } else {
-                    0
-                };
-                let idx = lx * 4;
-                row[idx] = a;
-                row[idx + 1] = a;
-                row[idx + 2] = a;
-                row[idx + 3] = 255;
-            }
-        });
+            let pos = TilePos {
+                x: tx as i32,
+                y: ty as i32,
+            };
+            (pos, tile)
+        })
+        .collect();
+    let mut map = TileMap::new(cw, ch);
+    for (pos, tile) in tiles {
+        map.tiles.insert(pos, Arc::new(tile));
+    }
 
     LayerMask {
-        tiles: TileMap::from_rgba(&buf, cw, ch),
+        tiles: map,
         width: cw,
         height: ch,
         enabled: true,
@@ -225,6 +335,59 @@ mod tests {
         // Frame edge boundary: (9,9) just outside, (10,10) just inside.
         assert!(mask.sample(9, 9) < 0.1);
         assert!(mask.sample(10, 10) > 0.9);
+    }
+
+    #[test]
+    fn frame_and_content_moved_together_keep_their_mask() {
+        let (mut canvas, frame_id, content_id) = make_frame(300, 280);
+        canvas.refresh_clip_masks();
+        let idx = |c: &Canvas, id: u32| {
+            c.layer_stack
+                .layers
+                .iter()
+                .position(|l| l.id == id)
+                .unwrap()
+        };
+        let (fi, ci) = (idx(&canvas, frame_id), idx(&canvas, content_id));
+        let before = canvas.layer_stack.layers[ci]
+            .mask
+            .as_ref()
+            .unwrap()
+            .tiles
+            .revision_fingerprint();
+        for i in [fi, ci] {
+            canvas.layer_stack.layers[i].offset.0 += 7;
+            canvas.layer_stack.layers[i].offset.1 -= 3;
+        }
+        canvas.refresh_clip_masks();
+        let mask = canvas.layer_stack.layers[ci].mask.clone().unwrap();
+        assert_eq!(
+            mask.tiles.revision_fingerprint(),
+            before,
+            "same pixels kept"
+        );
+        assert_eq!(mask.bake_offset, (7, -3));
+        assert_eq!(mask.bake_frame_offset, (17, 7));
+        // The same as a fresh bake at the new place.
+        let fresh = bake_clip_mask(&canvas.layer_stack.layers[fi], (7, -3), 300, 280);
+        for (x, y) in [
+            (2, 2),
+            (15, 15),
+            (10, 10),
+            (9, 9),
+            (29, 29),
+            (30, 30),
+            (299, 279),
+        ] {
+            assert_eq!(mask.sample(x, y), fresh.sample(x, y), "({x},{y})");
+        }
+        // Content alone moved: baked again, the frame now sits elsewhere on it.
+        canvas.layer_stack.layers[ci].offset.0 += 5;
+        canvas.refresh_clip_masks();
+        let moved = canvas.layer_stack.layers[ci].mask.as_ref().unwrap();
+        assert_ne!(moved.tiles.revision_fingerprint(), before);
+        assert!(moved.sample(5, 13) > 0.9 && moved.sample(24, 13) > 0.9);
+        assert!(moved.sample(4, 13) < 0.1 && moved.sample(25, 13) < 0.1);
     }
 
     #[test]

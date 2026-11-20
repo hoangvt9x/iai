@@ -92,7 +92,7 @@ pub fn stamp(
             StampOp::Smart => m.max(from + (1.0 - from) * k),
             StampOp::Subtract | StampOp::SmartOut => m * (1.0 - k),
         };
-        mask[i] = (v * 255.0).round() as u8;
+        mask[i] = iai_raster::fast_math::round_u8(v * 255.0);
     }
     Some(touched)
 }

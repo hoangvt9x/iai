@@ -250,7 +250,7 @@ impl App {
         let zoom = self.edit.view.zoom.max(0.0001);
         let cx = (self.edit.input.mouse_x - self.edit.view.offset_x) / zoom;
         let cy = (self.edit.input.mouse_y - self.edit.view.offset_y) / zoom;
-        let (radius, hardness, opacity, sample_merged, (off_x, off_y)) = {
+        let (radius, hardness, opacity, sample_merged, (off_x, off_y), plain) = {
             let tool = self.edit.tools.clone_like();
             (
                 (tool.size * 0.5).max(0.5),
@@ -258,8 +258,13 @@ impl App {
                 tool.opacity.clamp(0.0, 1.0),
                 tool.sample_merged,
                 tool.preview_offset(cx, cy)?,
+                !tool.heal_mode && !tool.spot_mode,
             )
         };
+        // The plain Clone paints Photoshop's measured tip, whose soft bell
+        // runs past the radius; healing keeps the tip that stops at it.
+        let tip = plain.then(|| crate::tools::brush::RoundTip::new(radius, hardness));
+        let reach = tip.as_ref().map_or(radius, |t| t.reach());
         let display_lut = self.shell.display_lut.clone();
 
         let canvas = &mut self.docs.active_mut().canvas;
@@ -285,10 +290,10 @@ impl App {
         }
 
         // Dab footprint in canvas pixels, clipped to the page.
-        let fx0 = ((cx - radius).floor() as i32).max(0);
-        let fy0 = ((cy - radius).floor() as i32).max(0);
-        let fx1 = ((cx + radius).ceil() as i32).min(w);
-        let fy1 = ((cy + radius).ceil() as i32).min(h);
+        let fx0 = ((cx - reach).floor() as i32).max(0);
+        let fy0 = ((cy - reach).floor() as i32).max(0);
+        let fx1 = ((cx + reach).ceil() as i32).min(w);
+        let fy1 = ((cy + reach).ceil() as i32).min(h);
         if fx1 <= fx0 || fy1 <= fy0 {
             return None;
         }
@@ -333,7 +338,7 @@ impl App {
             [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
         };
         let selection = &canvas.selection;
-        let r2 = radius * radius;
+        let r2 = reach * reach;
 
         let mut out = vec![0_u8; tw * th * 4];
         for ty in 0..th {
@@ -353,8 +358,10 @@ impl App {
                     if d2 > r2 {
                         continue;
                     }
-                    let mut a =
-                        crate::tools::brush::legacy_round_alpha(d2, radius, hardness) * opacity;
+                    let mut a = match &tip {
+                        Some(tip) => tip.alpha(d2),
+                        None => crate::tools::brush::legacy_round_alpha(d2, radius, hardness),
+                    } * opacity;
                     if selection.active {
                         a *= selection.sample(px as u32, py as u32);
                     }
@@ -1217,6 +1224,11 @@ impl App {
                 .unwrap_or(false),
             text_path: self.edit.text_edit.as_ref().and_then(|s| s.path.clone()),
             text_box_width: self.edit.text_edit.as_ref().and_then(|s| s.box_width),
+            text_box_height: self
+                .edit
+                .text_edit
+                .as_ref()
+                .and_then(|s| s.box_width.and(s.box_height)),
             text_box_drag: self.edit.text_box_drag.map(|(from, to)| {
                 let (zoom, ox, oy) = (
                     self.edit.view.zoom,

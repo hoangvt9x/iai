@@ -197,6 +197,9 @@ impl App {
         }
 
         self.docs.pending_close_doc_idx = None;
+        // Its pixels and Undo history go back to the system on a worker:
+        // freeing a long history took 0.2-0.5 s with the window held (20/11).
+        drop_in_background(removed);
         self.refresh_active_document();
     }
 
@@ -665,4 +668,15 @@ mod tests {
         );
         assert!(app.docs.documents[0].is_modified());
     }
+}
+
+/// Let a large value (a closed document, its history) go on a worker thread,
+/// so freeing its memory does not hold the window.
+pub(in crate::app) fn drop_in_background<T: Send + 'static>(value: T) {
+    let spawned = std::thread::Builder::new()
+        .name("iai-free".into())
+        .spawn(move || drop(value));
+    // No thread to be had: it is freed here, as before (the value went with
+    // the failed spawn's closure).
+    let _ = spawned;
 }

@@ -91,10 +91,18 @@ impl Canvas {
                         pixels[i + 3] = na;
                     } else {
                         let inv = 1.0 - sel_a;
-                        pixels[i] = (nr as f32 * sel_a + old[0] as f32 * inv).round() as u8;
-                        pixels[i + 1] = (ng as f32 * sel_a + old[1] as f32 * inv).round() as u8;
-                        pixels[i + 2] = (nb as f32 * sel_a + old[2] as f32 * inv).round() as u8;
-                        pixels[i + 3] = (na as f32 * sel_a + old[3] as f32 * inv).round() as u8;
+                        pixels[i] = iai_raster::fast_math::round_u8(
+                            nr as f32 * sel_a + old[0] as f32 * inv,
+                        );
+                        pixels[i + 1] = iai_raster::fast_math::round_u8(
+                            ng as f32 * sel_a + old[1] as f32 * inv,
+                        );
+                        pixels[i + 2] = iai_raster::fast_math::round_u8(
+                            nb as f32 * sel_a + old[2] as f32 * inv,
+                        );
+                        pixels[i + 3] = iai_raster::fast_math::round_u8(
+                            na as f32 * sel_a + old[3] as f32 * inv,
+                        );
                     }
                 }
             }
@@ -194,9 +202,9 @@ impl Canvas {
                     } else {
                         let inv = 1.0 - sel_a;
                         for c in 0..4 {
-                            out[i + c] = (filtered[i + c] as f32 * sel_a
-                                + original[i + c] as f32 * inv)
-                                .round() as u8;
+                            out[i + c] = iai_raster::fast_math::round_u8(
+                                filtered[i + c] as f32 * sel_a + original[i + c] as f32 * inv,
+                            );
                         }
                     }
                 }
@@ -468,6 +476,85 @@ impl Canvas {
         self.smart_fill_fill_hole(hole, allow_ai, false)
     }
 
+    /// The hole of the selection on the active layer, cut out for an AI Smart
+    /// Fill on a worker (seconds on a CPU: run on the window's thread it held
+    /// the window, 20/11). `None` when the layer is unsuitable or nothing is
+    /// selected on it. [`SmartFillWork::run`] fills it, and
+    /// [`Self::smart_fill_finish`] commits it.
+    pub fn smart_fill_begin(&mut self) -> Option<SmartFillWork> {
+        self.layer_stack.normalize_active_idx();
+        if self.layer_stack.layers.is_empty() || !self.selection.active {
+            return None;
+        }
+        let layer = &self.layer_stack.layers[self.layer_stack.active_idx];
+        if (!layer.is_background && layer.locked) || !layer.is_raster() {
+            return None;
+        }
+        let (lw, lh) = (layer.width as usize, layer.height as usize);
+        let (ox, oy) = layer.offset;
+        if lw == 0 || lh == 0 {
+            return None;
+        }
+        let mut hole = vec![false; lw * lh];
+        let mut any = false;
+        for y in 0..lh {
+            for x in 0..lw {
+                let cx = ox + x as i32;
+                let cy = oy + y as i32;
+                if cx < 0 || cy < 0 || cx >= self.width as i32 || cy >= self.height as i32 {
+                    continue;
+                }
+                if self.selection.sample(cx as u32, cy as u32) > 0.5 {
+                    hole[y * lw + x] = true;
+                    any = true;
+                }
+            }
+        }
+        if !any {
+            return None;
+        }
+        let before_tiles = layer.tiles.clone();
+        let pixels = before_tiles.flatten();
+        if pixels.len() < lw * lh * 4 {
+            return None;
+        }
+        Some(SmartFillWork {
+            layer_id: layer.id,
+            layer_size: (layer.width, layer.height),
+            before_tiles,
+            pixels,
+            hole,
+            used_ai: false,
+        })
+    }
+
+    /// Commit a [`SmartFillWork`] that has run: `Ok(false)` when its layer is
+    /// gone, an error when the layer changed meanwhile (the result would undo
+    /// that change).
+    pub fn smart_fill_finish(&mut self, work: SmartFillWork) -> Result<bool, &'static str> {
+        let Some(current) = self
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == work.layer_id)
+        else {
+            return Ok(false);
+        };
+        if (current.width, current.height) != work.layer_size
+            || current.tiles.revision_fingerprint() != work.before_tiles.revision_fingerprint()
+        {
+            return Err("ảnh đã thay đổi trong lúc xử lý");
+        }
+        let label = if work.used_ai {
+            "Smart Fill (AI)"
+        } else {
+            "Smart Fill"
+        };
+        let (w, h) = work.layer_size;
+        let after_tiles = iai_raster::tile::TileMap::from_rgba(&work.pixels, w, h);
+        Ok(self.commit_layer_tiles_change(work.layer_id, work.before_tiles, after_tiles, label))
+    }
+
     /// Smart fill an explicit layer-local hole mask (`len` must equal the
     /// active layer's `width*height`; `true` = pixel to synthesise) on the active
     /// raster layer. Shared by the selection-based fill and the Repair Brush's
@@ -669,9 +756,7 @@ impl Canvas {
                     None => (br, bg, bb, ba),
                 };
                 let mix = |b: u8, s: u8| {
-                    ((b as f32) * (1.0 - m) + (s as f32) * m)
-                        .round()
-                        .clamp(0.0, 255.0) as u8
+                    iai_raster::fast_math::round_u8((b as f32) * (1.0 - m) + (s as f32) * m)
                 };
                 tiles.set_pixel(
                     lx as u32,
@@ -890,25 +975,28 @@ impl Canvas {
                     let dst_r = region[i] as f32 / 255.0;
                     let dst_g = region[i + 1] as f32 / 255.0;
                     let dst_b = region[i + 2] as f32 / 255.0;
-                    region[i] = ((src_r * w + dst_r * (1.0 - w)) * 255.0).round() as u8;
-                    region[i + 1] = ((src_g * w + dst_g * (1.0 - w)) * 255.0).round() as u8;
-                    region[i + 2] = ((src_b * w + dst_b * (1.0 - w)) * 255.0).round() as u8;
+                    region[i] =
+                        iai_raster::fast_math::round_u8((src_r * w + dst_r * (1.0 - w)) * 255.0);
+                    region[i + 1] =
+                        iai_raster::fast_math::round_u8((src_g * w + dst_g * (1.0 - w)) * 255.0);
+                    region[i + 2] =
+                        iai_raster::fast_math::round_u8((src_b * w + dst_b * (1.0 - w)) * 255.0);
                 } else {
                     let out_a = src_a + dst_a * (1.0 - src_a);
                     if out_a > 0.001 {
                         let dst_r = region[i] as f32 / 255.0;
                         let dst_g = region[i + 1] as f32 / 255.0;
                         let dst_b = region[i + 2] as f32 / 255.0;
-                        region[i] = ((src_r * src_a + dst_r * dst_a * (1.0 - src_a)) / out_a
-                            * 255.0)
-                            .round() as u8;
-                        region[i + 1] = ((src_g * src_a + dst_g * dst_a * (1.0 - src_a)) / out_a
-                            * 255.0)
-                            .round() as u8;
-                        region[i + 2] = ((src_b * src_a + dst_b * dst_a * (1.0 - src_a)) / out_a
-                            * 255.0)
-                            .round() as u8;
-                        region[i + 3] = (out_a * 255.0).round() as u8;
+                        region[i] = iai_raster::fast_math::round_u8(
+                            (src_r * src_a + dst_r * dst_a * (1.0 - src_a)) / out_a * 255.0,
+                        );
+                        region[i + 1] = iai_raster::fast_math::round_u8(
+                            (src_g * src_a + dst_g * dst_a * (1.0 - src_a)) / out_a * 255.0,
+                        );
+                        region[i + 2] = iai_raster::fast_math::round_u8(
+                            (src_b * src_a + dst_b * dst_a * (1.0 - src_a)) / out_a * 255.0,
+                        );
+                        region[i + 3] = iai_raster::fast_math::round_u8(out_a * 255.0);
                         if region[i + 3] == 0 {
                             region[i] = 0;
                             region[i + 1] = 0;
@@ -1011,25 +1099,28 @@ impl Canvas {
                     let dst_r = region[i] as f32 / 255.0;
                     let dst_g = region[i + 1] as f32 / 255.0;
                     let dst_b = region[i + 2] as f32 / 255.0;
-                    region[i] = ((src_r * w + dst_r * (1.0 - w)) * 255.0).round() as u8;
-                    region[i + 1] = ((src_g * w + dst_g * (1.0 - w)) * 255.0).round() as u8;
-                    region[i + 2] = ((src_b * w + dst_b * (1.0 - w)) * 255.0).round() as u8;
+                    region[i] =
+                        iai_raster::fast_math::round_u8((src_r * w + dst_r * (1.0 - w)) * 255.0);
+                    region[i + 1] =
+                        iai_raster::fast_math::round_u8((src_g * w + dst_g * (1.0 - w)) * 255.0);
+                    region[i + 2] =
+                        iai_raster::fast_math::round_u8((src_b * w + dst_b * (1.0 - w)) * 255.0);
                 } else {
                     let out_a = src_a + dst_a * (1.0 - src_a);
                     if out_a > 0.001 {
                         let dst_r = region[i] as f32 / 255.0;
                         let dst_g = region[i + 1] as f32 / 255.0;
                         let dst_b = region[i + 2] as f32 / 255.0;
-                        region[i] = ((src_r * src_a + dst_r * dst_a * (1.0 - src_a)) / out_a
-                            * 255.0)
-                            .round() as u8;
-                        region[i + 1] = ((src_g * src_a + dst_g * dst_a * (1.0 - src_a)) / out_a
-                            * 255.0)
-                            .round() as u8;
-                        region[i + 2] = ((src_b * src_a + dst_b * dst_a * (1.0 - src_a)) / out_a
-                            * 255.0)
-                            .round() as u8;
-                        region[i + 3] = (out_a * 255.0).round() as u8;
+                        region[i] = iai_raster::fast_math::round_u8(
+                            (src_r * src_a + dst_r * dst_a * (1.0 - src_a)) / out_a * 255.0,
+                        );
+                        region[i + 1] = iai_raster::fast_math::round_u8(
+                            (src_g * src_a + dst_g * dst_a * (1.0 - src_a)) / out_a * 255.0,
+                        );
+                        region[i + 2] = iai_raster::fast_math::round_u8(
+                            (src_b * src_a + dst_b * dst_a * (1.0 - src_a)) / out_a * 255.0,
+                        );
+                        region[i + 3] = iai_raster::fast_math::round_u8(out_a * 255.0);
                     }
                 }
             }
@@ -1097,7 +1188,9 @@ impl Canvas {
             }
         }
 
-        let a = (params.color[3] as f32 * params.opacity.clamp(0.0, 1.0)).round() as u8;
+        let a = iai_raster::fast_math::round_u8(
+            params.color[3] as f32 * params.opacity.clamp(0.0, 1.0),
+        );
         let color = [params.color[0], params.color[1], params.color[2], a];
         self.composite_solid_coverage("Stroke", color, bx0, by0, bw, bh, &cov);
     }
@@ -1321,6 +1414,39 @@ impl Canvas {
         let mut after_tiles = before_tiles.clone();
         after_tiles.write_region(work.x0, work.y0, work.w, work.h, &work.pixels);
         Ok(self.commit_layer_tiles_change(work.layer_id, before_tiles, after_tiles, label))
+    }
+}
+
+/// A Smart Fill cut out of a layer, to run on a worker (see
+/// `Canvas::smart_fill_begin`).
+pub struct SmartFillWork {
+    layer_id: u32,
+    layer_size: (u32, u32),
+    /// The layer's tiles when the work began (cheap Arc clone).
+    before_tiles: iai_raster::tile::TileMap,
+    pixels: Vec<u8>,
+    hole: Vec<bool>,
+    used_ai: bool,
+}
+
+impl SmartFillWork {
+    /// Fill the hole: the LaMa inpainter when `use_ai` and it runs, else the
+    /// classic fill. False when nothing could be filled.
+    pub fn run(&mut self, use_ai: bool) -> bool {
+        let (w, h) = (self.layer_size.0 as usize, self.layer_size.1 as usize);
+        self.used_ai = use_ai && iai_ai::lama::inpaint(&mut self.pixels, w, h, &self.hole);
+        if self.used_ai {
+            // LaMa works at 512 px and smooths grain: bring the photo's own
+            // texture back at full resolution, as the Repair Brush does.
+            iai_ai::smart_fill::refine_fill(&mut self.pixels, w, h, &self.hole);
+            true
+        } else {
+            iai_ai::smart_fill::fill(&mut self.pixels, w, h, &self.hole)
+        }
+    }
+
+    pub fn used_ai(&self) -> bool {
+        self.used_ai
     }
 }
 

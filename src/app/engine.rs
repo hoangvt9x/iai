@@ -149,6 +149,22 @@ impl App {
         reply
     }
 
+    /// The answer `call`, run as a job, has now that the job ended as
+    /// `state` (see `Session::reply_for_job`).
+    #[cfg(feature = "pro")]
+    pub(crate) fn reply_for_job(
+        &mut self,
+        call: &CommandCall,
+        state: Option<iai_engine::JobState>,
+    ) -> Result<Reply, CmdError> {
+        let over_welcome = self.has_only_welcome_placeholder();
+        let mut ws = GuiWorkspace {
+            docs: &mut self.docs,
+            over_welcome,
+        };
+        self.engine.session(&mut ws).reply_for_job(call, state)
+    }
+
     /// Run command `id` on the document shown, with no params, to the end.
     pub(crate) fn run_now(&mut self, id: &str) -> Result<Reply, CmdError> {
         self.execute_command(CommandCall::new(id, serde_json::json!({})))

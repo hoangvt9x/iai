@@ -86,7 +86,7 @@ impl Gray {
                     let p = |dx: isize, dy: isize| self.at(x0 + dx, y0 + dy) as f32;
                     let top = p(0, 0) + (p(1, 0) - p(0, 0)) * tx;
                     let bottom = p(0, 1) + (p(1, 1) - p(0, 1)) * tx;
-                    (top + (bottom - top) * ty).round() as u8
+                    iai_raster::fast_math::round_u8(top + (bottom - top) * ty)
                 })
             })
             .collect();

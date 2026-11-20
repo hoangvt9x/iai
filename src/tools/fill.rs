@@ -322,7 +322,9 @@ impl FillTool {
                                     if wm[c] {
                                         let d = ink_plane[di + c] as f32 / 255.0;
                                         let s = fink[c] as f32 / 255.0;
-                                        let v = ((d + (s - d) * sa) * 255.0).round() as u8;
+                                        let v = crate::core::fast_math::round_u8(
+                                            (d + (s - d) * sa) * 255.0,
+                                        );
                                         ink_plane[di + c] = v;
                                         ink[c] = v;
                                     }
@@ -343,10 +345,9 @@ impl FillTool {
                             for c in 0..4 {
                                 let d = ink_plane[di + c] as f32 / 255.0;
                                 let s = fink[c] as f32 / 255.0;
-                                let v = (((s * sa + d * dw) / new_a) * 255.0)
-                                    .round()
-                                    .clamp(0.0, 255.0)
-                                    as u8;
+                                let v = crate::core::fast_math::round_u8(
+                                    ((s * sa + d * dw) / new_a) * 255.0,
+                                );
                                 ink_plane[di + c] = v;
                                 ink[c] = v;
                             }
@@ -354,7 +355,7 @@ impl FillTool {
                             tile.pixels[di] = rgb[0];
                             tile.pixels[di + 1] = rgb[1];
                             tile.pixels[di + 2] = rgb[2];
-                            tile.pixels[di + 3] = (new_a * 255.0).round() as u8;
+                            tile.pixels[di + 3] = crate::core::fast_math::round_u8(new_a * 255.0);
                             continue;
                         }
                         if let Some(wm) = channel_wm {

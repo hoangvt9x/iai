@@ -74,9 +74,13 @@ impl Tip {
     fn new(size: f32, hardness: f32, strength: f32, centre: (f32, f32)) -> Self {
         let radius = (size * 0.5).max(0.5);
         let diameter = radius * 2.0;
+        // Photoshop's measured round tip, as the Brush paints: a soft tip's
+        // bell runs on past the radius, to its reach (20/11).
+        let round = super::brush::RoundTip::new(radius, hardness);
+        let reach = round.reach().max(0.5);
         // One ring of cells beyond the rim: a layer pixel reads the four
         // cells around it.
-        let half = (radius + 0.5).ceil() as i32 + 1;
+        let half = (reach + 0.5).ceil() as i32 + 1;
         let n = (2 * half + 1) as usize;
 
         // A cell that should carry the share `c` of the picture lays paint
@@ -105,10 +109,10 @@ impl Tip {
                 for i in 0..n {
                     let dx = (i as i32 - half) as f32 - centre.0;
                     let d2 = dx * dx + dy * dy;
-                    let cover = if d2 > radius * radius {
+                    let cover = if d2 > reach * reach {
                         0.0
                     } else {
-                        scrub::dab_coverage(d2, radius, hardness)
+                        round.alpha(d2)
                     };
                     let c = strength * cover;
                     let lay_t = lay_turns(c);
@@ -215,7 +219,7 @@ fn to_bytes(p: [f32; 4]) -> [u8; 4] {
     if a8 < 1.0 {
         return [0; 4];
     }
-    let q = |v: f32| ((v / a).clamp(0.0, 1.0) * 255.0).round() as u8;
+    let q = |v: f32| crate::core::fast_math::round_u8((v / a).clamp(0.0, 1.0) * 255.0);
     [q(p[0]), q(p[1]), q(p[2]), a8 as u8]
 }
 
@@ -798,10 +802,11 @@ mod tests {
         let (v, g, b, a) = mask.tiles.get_pixel(36, 32);
         assert!(v > 40, "white is pushed past the edge, got {v}");
         assert_eq!((g, b, a), (v, v, 255), "mask stays opaque gray");
-        assert_eq!(
-            mask.tiles.get_pixel(36, 5).0,
-            0,
-            "outside the stroke untouched"
+        // 27 px off a 40 px soft tip's path: only the far tail of its bell,
+        // which runs on to ~1.65 r as Photoshop's does.
+        assert!(
+            mask.tiles.get_pixel(36, 5).0 <= 4,
+            "outside the stroke barely touched"
         );
     }
 
