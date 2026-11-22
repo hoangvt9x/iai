@@ -4,6 +4,7 @@
 
 22/11/2026
 - Máy Mac: phím tắt dùng phím Command thay cho Ctrl — Command+S lưu, Command+Z hoàn tác, Command+C / Command+V chép, dán… Các thao tác giữ Ctrl rồi bấm / kéo chuột trên Mac cũng giữ Command. Menu ghi «Cmd+» và «Option+».
+- Máy Mac: sửa lỗi mở app lên mà bấm chuột không được nút nào (cảm ơn bạn hoangvt9x đã tìm ra và sửa).
 - Máy Windows không đổi gì.
 
 20/11/2026
