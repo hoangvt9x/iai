@@ -97,6 +97,21 @@ pub(crate) fn document_side_dialog_pos(
     egui::pos2(x, y.max(screen.min.y + 48.0))
 }
 
+/// A shortcut as the keyboard in front of the user names it: on macOS the
+/// "Ctrl" of every chord is ⌘ Command (see `app::input::is_primary_modifier`)
+/// and Alt is Option. Stored chords keep the Ctrl/Alt spelling.
+pub(crate) fn platform_shortcut_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(target_os = "macos") {
+        mac_shortcut_text(text).into()
+    } else {
+        text.into()
+    }
+}
+
+fn mac_shortcut_text(text: &str) -> String {
+    text.replace("Ctrl+", "Cmd+").replace("Alt+", "Option+")
+}
+
 fn flat_context_menu_item(
     ui: &mut egui::Ui,
     width: f32,
@@ -134,7 +149,7 @@ fn flat_context_menu_item(
         ui.painter().text(
             egui::pos2(rect.right() - 10.0, rect.center().y),
             egui::Align2::RIGHT_CENTER,
-            shortcut,
+            platform_shortcut_text(shortcut),
             font,
             shortcut_color,
         );
@@ -999,7 +1014,7 @@ fn consume_chord(input: &mut egui::InputState, chord: crate::app::commands::KeyC
                     modifiers,
                     ..
                 } if physical_key.unwrap_or(*key) == want
-                    && modifiers.ctrl == chord.ctrl
+                    && modifiers.command == chord.ctrl
                     && modifiers.shift == chord.shift
                     && modifiers.alt == chord.alt
             );
@@ -1100,7 +1115,7 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
         let new_hit = if keymap.is_default(Command::FileNew) {
             ctx.input_mut(|i| {
                 i.consume_shortcut(&egui::KeyboardShortcut::new(
-                    egui::Modifiers::CTRL,
+                    egui::Modifiers::COMMAND,
                     egui::Key::N,
                 ))
             })
@@ -1123,7 +1138,7 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
         let preferences_hit = if keymap.is_default(Command::Preferences) {
             ctx.input_mut(|i| {
                 i.consume_shortcut(&egui::KeyboardShortcut::new(
-                    egui::Modifiers::CTRL,
+                    egui::Modifiers::COMMAND,
                     egui::Key::K,
                 ))
             })
@@ -5594,5 +5609,16 @@ mod ruler_tests {
         image
             .save(std::path::Path::new(&dir).join("thuoc.png"))
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod mac_shortcut_text_tests {
+    #[test]
+    fn mac_names_command_and_option() {
+        assert_eq!(super::mac_shortcut_text("Ctrl+Shift+S"), "Cmd+Shift+S");
+        assert_eq!(super::mac_shortcut_text("Ctrl+Alt+9"), "Cmd+Option+9");
+        assert_eq!(super::mac_shortcut_text("B"), "B");
+        assert_eq!(super::mac_shortcut_text("Ctrl++ / Ctrl+-"), "Cmd++ / Cmd+-");
     }
 }

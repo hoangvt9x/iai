@@ -667,7 +667,8 @@ fn preferences_shortcuts(
                     } else if label.is_empty() {
                         egui::RichText::new("—").color(egui::Color32::GRAY)
                     } else {
-                        egui::RichText::new(label).color(KEY_COLOR)
+                        egui::RichText::new(crate::ui::platform_shortcut_text(&label))
+                            .color(KEY_COLOR)
                     };
                     let key_button = egui::Button::new(text.monospace())
                         .min_size(egui::vec2(130.0, 0.0))

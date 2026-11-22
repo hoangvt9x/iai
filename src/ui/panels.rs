@@ -3286,7 +3286,7 @@ fn channels_panel_contents(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAct
     use crate::core::channels::ChannelView;
 
     ui.add_space(4.0);
-    let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
+    let additive = ui.input(|i| i.modifiers.command || i.modifiers.shift);
     let viewing_alpha = matches!(data.channels.channel_view, ChannelView::Alpha(_));
 
     let row = |ui: &mut egui::Ui,
@@ -3494,7 +3494,7 @@ fn channels_panel_contents(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAct
             .clicked()
             && let Some(idx) = alpha_target
         {
-            let (ctrl, alt) = ui.input(|inp| (inp.modifiers.ctrl, inp.modifiers.alt));
+            let (ctrl, alt) = ui.input(|inp| (inp.modifiers.command, inp.modifiers.alt));
             let mode = match (ctrl, alt) {
                 (true, true) => "intersect",
                 (true, false) => "add",

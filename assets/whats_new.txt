@@ -2,6 +2,10 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+22/11/2026
+- Máy Mac: phím tắt dùng phím Command thay cho Ctrl — Command+S lưu, Command+Z hoàn tác, Command+C / Command+V chép, dán… Các thao tác giữ Ctrl rồi bấm / kéo chuột trên Mac cũng giữ Command. Menu ghi «Cmd+» và «Option+».
+- Máy Windows không đổi gì.
+
 20/11/2026
 - App mượt hơn ở nhiều chỗ hay dùng: kéo / nhả chuột với công cụ Move, bấm chọn chữ và hình, kéo ảnh nằm trong khung cắt, Ctrl+C cả ảnh, tô Gradient, đổi màu chữ, đóng tab, gộp layer (Flatten) — không còn khựng nửa giây đến một giây như trước.
 - Smart Fill (lấp vùng chọn, kể cả bằng AI) và «Làm sạch bản scan» cho nhiều trang PDF nay chạy ngầm: cửa sổ không còn đứng hình, làm việc khác trong lúc chờ được.

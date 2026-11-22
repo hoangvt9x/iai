@@ -393,7 +393,7 @@ fn build_pdf(
     let index = nav.index.min(count - 1);
 
     // Ctrl+PageUp / Ctrl+PageDown flip pages (common PDF-reader shortcut).
-    if ctx.input(|i| i.modifiers.ctrl) {
+    if ctx.input(|i| i.modifiers.command) {
         if index + 1 < count && ctx.input(|i| i.key_pressed(egui::Key::PageDown)) {
             actions.doc.pdf_nav_goto = Some(index + 1);
         }

@@ -2016,7 +2016,10 @@ fn help_menu(
     // The flight recorder (`crate::diag`): mark the moment
     // something went wrong, or fetch its files.
     if ui
-        .add(egui::Button::new("Đánh dấu lỗi vừa gặp").shortcut_text("Ctrl+Shift+F12"))
+        .add(
+            egui::Button::new("Đánh dấu lỗi vừa gặp")
+                .shortcut_text(crate::ui::platform_shortcut_text("Ctrl+Shift+F12")),
+        )
         .clicked()
     {
         actions.chrome.mark_problem = true;
@@ -2191,7 +2194,7 @@ fn with_shortcut(name: &str, shortcut: &str) -> String {
 fn menu_item<'a>(label: &'a str, shortcut: &'a str) -> egui::Button<'a> {
     let mut btn = egui::Button::new(label).wrap_mode(egui::TextWrapMode::Extend);
     if !shortcut.is_empty() {
-        btn = btn.shortcut_text(shortcut);
+        btn = btn.shortcut_text(crate::ui::platform_shortcut_text(shortcut));
     }
     btn
 }
@@ -2222,7 +2225,7 @@ fn keyboard_shortcuts_list(
         .show(ui, |ui| {
             let row = |ui: &mut egui::Ui, keys: &str, action: &str| {
                 ui.label(
-                    egui::RichText::new(keys)
+                    egui::RichText::new(crate::ui::platform_shortcut_text(keys))
                         .monospace()
                         .size(11.0)
                         .color(pal.text_primary),

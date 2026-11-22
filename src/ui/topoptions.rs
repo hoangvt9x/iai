@@ -1827,7 +1827,7 @@ fn shaping_buttons(ui: &mut egui::Ui, actions: &mut UiActions) {
 }
 
 fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    let ctrl_held = ui.input(|i| i.modifiers.ctrl);
+    let ctrl_held = ui.input(|i| i.modifiers.command);
     let mut auto_select = data.tool.move_auto_select ^ ctrl_held;
     if ui.checkbox(&mut auto_select, "Auto-Select Layer").changed() {
         actions.tool.set_move_auto_select = Some(auto_select ^ ctrl_held);

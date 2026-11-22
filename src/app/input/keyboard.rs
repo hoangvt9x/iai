@@ -62,7 +62,7 @@ impl InputState {
                 }
                 &mut self.alt_held
             }
-            PhysicalKey::Code(KeyCode::ControlLeft | KeyCode::ControlRight) => &mut self.ctrl_held,
+            PhysicalKey::Code(code) if super::is_primary_modifier(code) => &mut self.ctrl_held,
             PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight) => &mut self.shift_held,
             PhysicalKey::Code(KeyCode::Space) if !pressed => {
                 self.space_dragging = false;
@@ -92,7 +92,7 @@ impl App {
                     self.edit.input.alt_right_dragging = false;
                 }
             }
-            PhysicalKey::Code(KeyCode::ControlLeft) | PhysicalKey::Code(KeyCode::ControlRight) => {
+            PhysicalKey::Code(code) if super::is_primary_modifier(code) => {
                 self.edit.input.ctrl_held = pressed;
                 // Pen tool: Ctrl swaps the cursor to an arrow (edit mode).
                 if self.edit.tools.active_id() == ToolId::Pen {
@@ -181,6 +181,8 @@ impl App {
                         | PhysicalKey::Code(KeyCode::Space)
                         | PhysicalKey::Code(KeyCode::ControlLeft)
                         | PhysicalKey::Code(KeyCode::ControlRight)
+                        | PhysicalKey::Code(KeyCode::SuperLeft)
+                        | PhysicalKey::Code(KeyCode::SuperRight)
                         | PhysicalKey::Code(KeyCode::ShiftLeft)
                         | PhysicalKey::Code(KeyCode::ShiftRight)
                         | PhysicalKey::Code(KeyCode::AltLeft)
@@ -235,6 +237,8 @@ impl App {
                     | PhysicalKey::Code(KeyCode::AltRight)
                     | PhysicalKey::Code(KeyCode::ControlLeft)
                     | PhysicalKey::Code(KeyCode::ControlRight)
+                    | PhysicalKey::Code(KeyCode::SuperLeft)
+                    | PhysicalKey::Code(KeyCode::SuperRight)
                     | PhysicalKey::Code(KeyCode::ShiftLeft)
                     | PhysicalKey::Code(KeyCode::ShiftRight)
                     | PhysicalKey::Code(KeyCode::KeyZ)
@@ -307,7 +311,7 @@ impl App {
                     self.edit.input.alt_right_dragging = false;
                 }
             }
-            PhysicalKey::Code(KeyCode::ControlLeft) | PhysicalKey::Code(KeyCode::ControlRight) => {
+            PhysicalKey::Code(code) if super::is_primary_modifier(code) => {
                 self.edit.input.ctrl_held = pressed;
                 // Pen tool: Ctrl swaps the cursor to an arrow (edit mode).
                 if self.edit.tools.active_id() == ToolId::Pen {
@@ -1199,7 +1203,7 @@ impl App {
             return true;
         };
         match code {
-            KeyCode::ControlLeft | KeyCode::ControlRight => {
+            code if super::is_primary_modifier(code) => {
                 self.edit.input.ctrl_held = pressed;
                 return true;
             }
@@ -1370,6 +1374,8 @@ impl App {
         let passes = match code {
             KeyCode::ControlLeft
             | KeyCode::ControlRight
+            | KeyCode::SuperLeft
+            | KeyCode::SuperRight
             | KeyCode::ShiftLeft
             | KeyCode::ShiftRight
             | KeyCode::AltLeft

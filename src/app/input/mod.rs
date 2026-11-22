@@ -138,6 +138,26 @@ pub(in crate::app) fn window_is_minimized(window: &Window) -> bool {
     window.is_minimized() == Some(true)
 }
 
+/// The key every "Ctrl" shortcut and Ctrl-drag listens to: Ctrl on Windows
+/// and Linux, ⌘ Command on macOS, where Control-click is the right click and
+/// people reach for ⌘S, ⌘Z, ⌘-drag. `ctrl_held` follows this key.
+pub(in crate::app) fn is_primary_modifier(code: KeyCode) -> bool {
+    if cfg!(target_os = "macos") {
+        matches!(code, KeyCode::SuperLeft | KeyCode::SuperRight)
+    } else {
+        matches!(code, KeyCode::ControlLeft | KeyCode::ControlRight)
+    }
+}
+
+/// Whether the primary modifier (see [`is_primary_modifier`]) is down.
+pub(in crate::app) fn primary_modifier_held(state: winit::keyboard::ModifiersState) -> bool {
+    if cfg!(target_os = "macos") {
+        state.super_key()
+    } else {
+        state.control_key()
+    }
+}
+
 impl App {
     fn alpha_view_allows_tool(&self, tool: ToolId) -> bool {
         !matches!(
@@ -1265,7 +1285,7 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(modifiers) => {
                 let state = modifiers.state();
                 self.edit.input.alt_held = state.alt_key();
-                self.edit.input.ctrl_held = state.control_key();
+                self.edit.input.ctrl_held = primary_modifier_held(state);
                 self.edit.input.shift_held = state.shift_key();
                 if !self.edit.input.alt_held {
                     self.edit.input.alt_right_dragging = false;

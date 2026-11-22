@@ -145,7 +145,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let active = data.doc.active_doc_idx;
     let doc_count = data.doc.doc_count;
 
-    let ctrl = ctx.input(|i| i.modifiers.ctrl);
+    let ctrl = ctx.input(|i| i.modifiers.command);
     if ctrl && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
         let shift = ctx.input(|i| i.modifiers.shift);
         if doc_count > 1 {
