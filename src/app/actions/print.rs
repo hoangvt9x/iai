@@ -449,6 +449,7 @@ impl App {
         }
     }
 
+    #[cfg_attr(target_os = "macos", allow(unused_mut))]
     pub(super) fn apply_printer_list(
         &mut self,
         mut printers: Vec<crate::core::print::PrinterInfo>,

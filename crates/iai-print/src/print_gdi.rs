@@ -25,11 +25,14 @@ pub struct PrinterSettings {
     // `DocumentPropertiesW` requires DEVMODE-aligned storage. A byte Vec is
     // only aligned to 1 by contract, whereas usize storage is sufficiently
     // aligned for the structure and its driver-private tail.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     storage: Vec<usize>,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     byte_len: usize,
 }
 
 impl PrinterSettings {
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn new(printer: &str, byte_len: usize) -> Self {
         let words = byte_len.div_ceil(std::mem::size_of::<usize>());
         Self {

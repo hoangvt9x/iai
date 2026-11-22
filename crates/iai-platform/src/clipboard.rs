@@ -107,11 +107,13 @@ pub fn read_image_ppi() -> Option<f32> {
 }
 
 /// Pixels per inch from metres, rounded: 11811 px/m is 300 ppi.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn per_metre(ppm: u32) -> Option<f32> {
     (ppm > 0).then(|| (ppm as f32 * 0.0254).round().max(1.0))
 }
 
 /// Pixels per inch in a PNG's pHYs chunk, when it is given in metres.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn png_ppi(bytes: &[u8]) -> Option<f32> {
     let mut rest = bytes.strip_prefix(b"\x89PNG\r\n\x1a\n")?;
     while rest.len() >= 12 {
@@ -131,6 +133,7 @@ fn png_ppi(bytes: &[u8]) -> Option<f32> {
 }
 
 /// Pixels per inch in a DIB's header (`biXPelsPerMeter`), when it is set.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn dib_ppi(bytes: &[u8]) -> Option<f32> {
     let ppm = i32::from_le_bytes(bytes.get(24..28)?.try_into().ok()?);
     per_metre(u32::try_from(ppm).ok()?)

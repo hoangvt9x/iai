@@ -106,6 +106,7 @@ fn native_work_area(
     ))
 }
 
+#[cfg_attr(target_os = "macos", allow(unused_variables, unused_mut))]
 fn develop_work_area(
     main: Option<&Window>,
     monitor: &winit::monitor::MonitorHandle,

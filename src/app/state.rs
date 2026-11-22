@@ -1791,6 +1791,14 @@ impl App {
     /// `None` when maximized or away from the edge (normal canvas/UI interaction).
     pub fn resize_direction(&self) -> Option<winit::window::ResizeDirection> {
         use winit::window::ResizeDirection;
+        // macOS: winit has no `drag_resize_window` there (the system resizes
+        // the borderless window by its edges itself), and `is_maximized()` on
+        // a borderless window briefly swaps its style mask, which re-attaches
+        // the content view: asked on every pointer move and press, the window
+        // lost each mouse-up, so no click ever landed.
+        if cfg!(target_os = "macos") {
+            return None;
+        }
         let win = self.win.window.as_ref()?;
         if win.is_maximized() {
             return None;
