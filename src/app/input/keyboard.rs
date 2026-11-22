@@ -1826,7 +1826,13 @@ mod tests {
         // every drag panned. `note_key` runs before either can swallow it.
         let mut app = App::new();
         let input = &mut app.edit.input;
-        for key in [KeyCode::AltLeft, KeyCode::ShiftRight, KeyCode::ControlLeft] {
+        // The key `ctrl_held` follows: Command on the Mac.
+        let ctrl = if cfg!(target_os = "macos") {
+            KeyCode::SuperLeft
+        } else {
+            KeyCode::ControlLeft
+        };
+        for key in [KeyCode::AltLeft, KeyCode::ShiftRight, ctrl] {
             assert!(input.note_key(PhysicalKey::Code(key), true));
         }
         // The router took the Space press and an Alt+right-drag began.
@@ -1834,12 +1840,7 @@ mod tests {
         input.space_dragging = true;
         input.alt_right_dragging = true;
 
-        for key in [
-            KeyCode::AltLeft,
-            KeyCode::ShiftRight,
-            KeyCode::ControlLeft,
-            KeyCode::Space,
-        ] {
+        for key in [KeyCode::AltLeft, KeyCode::ShiftRight, ctrl, KeyCode::Space] {
             assert!(input.note_key(PhysicalKey::Code(key), false), "{key:?}");
         }
         assert!(!input.alt_held && !input.shift_held && !input.ctrl_held);

@@ -122,9 +122,12 @@ mod tests {
         assert!(recall_in(&dir, &photo).is_none());
         remember_in(&dir, &photo, &settings);
         assert_eq!(recall_in(&dir, &photo), Some(settings.clone()));
-        // Same name in another case: the same Windows file.
-        let upper = root.join("img_0001.cr2");
-        assert_eq!(recall_in(&dir, &upper), Some(settings.clone()));
+        // Same name in another case: the same file on Windows (and on a Mac
+        // disk as it comes); Linux keeps the two names apart.
+        if cfg!(any(windows, target_os = "macos")) {
+            let upper = root.join("img_0001.cr2");
+            assert_eq!(recall_in(&dir, &upper), Some(settings.clone()));
+        }
 
         // Replaced by a different photo of another size: forgotten.
         std::fs::write(&photo, [1u8; 65]).unwrap();
