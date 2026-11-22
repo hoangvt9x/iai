@@ -56,7 +56,17 @@ iAi is built from source with Cargo. The steps below take you from a clean machi
 
 > **Requirements at a glance:** Git · Rust (stable, 1.85 or newer — edition 2024) · a C/C++ toolchain · a GPU with Vulkan, Metal, DX12 or OpenGL support. Some AI features download a model on first use.
 
-> **Platform support.** Windows is the primary target — full CI (build + test) and the only one with a published build. macOS and Linux are **compile-checked in CI on every push** and build from the same source; they are not yet runtime-verified, so there are no prebuilt binaries for them yet.
+> **Platform support.** Windows is the primary target — full CI (build + test) and a published build that updates itself. macOS has a published build too (below); macOS and Linux are **built and tested in CI on every push** from the same source.
+
+### Download for macOS (no build needed)
+
+For Macs with an Apple chip (M1, M2, M3, M4):
+
+1. Download **[iAi-mac.dmg](https://github.com/tongnghia2026/iai/releases/latest/download/iAi-mac.dmg)** and open it.
+2. Drag **iAi** onto the **Applications** folder beside it.
+3. Open iAi from Applications. The first time, macOS says it cannot verify the app (it is not signed with an Apple developer account): open **System Settings → Privacy & Security**, scroll down and press **Open Anyway**. This is asked only once.
+
+The Mac build is the free core, without the Pro pack, and does not update itself: for a newer build, download the file again. Intel Macs: build from source as below.
 
 ### Windows
 
@@ -149,7 +159,7 @@ git clone https://github.com/tongnghia2026/iai.git
 cd iai
 
 # Build & run in release mode (strongly recommended for performance)
-cargo run --release
+cargo run --release --bin iai
 ```
 
 The first build downloads and compiles all dependencies, so it can take a few minutes; later builds are incremental and fast.
@@ -163,7 +173,7 @@ cd iai
 git status
 git pull --rebase origin main
 cargo fetch
-cargo run --release
+cargo run --release --bin iai
 ```
 
 If your local copy has throwaway test changes and you want it to exactly match GitHub:
@@ -173,7 +183,7 @@ cd iai
 git fetch origin
 git checkout main
 git reset --hard origin/main
-cargo run --release
+cargo run --release --bin iai
 ```
 
 Use `cargo check` for a quick compile test. Before a release build, run the tests of every crate:
@@ -274,7 +284,7 @@ available.
 
 ### The Pro pack
 
-This repository is the core of iAi, whole: `cargo run --release` builds an
+This repository is the core of iAi, whole: `cargo run --release --bin iai` builds an
 editor with everything listed above except the Pro pack.
 
 The Pro pack ("Gói Pro") is, in the published builds: the **AI** window — ID
