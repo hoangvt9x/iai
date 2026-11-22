@@ -54,7 +54,7 @@ save documents through it, or run a script of commands headless (`iai.exe run`).
 
 iAi is built from source with Cargo. The steps below take you from a clean machine to a running build on **Windows**, **macOS** and **Linux**, including installing Git and the Rust toolchain.
 
-> **Requirements at a glance:** Git · Rust (stable, 1.85 or newer — edition 2024) · a C/C++ toolchain · a GPU with Vulkan, Metal, DX12 or OpenGL support. Some AI features download a model on first use.
+> **Requirements at a glance:** Git · **Rust 1.97.0** (exactly this version: newer releases break the build of the ONNX Runtime dependency) · a C/C++ toolchain · a GPU with Vulkan, Metal, DX12 or OpenGL support. Some AI features download a model on first use.
 
 > **Platform support.** Windows is the primary target — full CI (build + test) and a published build that updates itself. macOS has a published build too (below); macOS and Linux are **built and tested in CI on every push** from the same source.
 
@@ -85,7 +85,10 @@ The Mac build is the free core, without the Pro pack, and does not update itself
 3. **Install Rust** via rustup:
    ```powershell
    winget install --id Rustlang.Rustup -e
-   rustup default stable
+   ```
+   Then, in a **new** terminal, pin the version iAi is built with:
+   ```powershell
+   rustup default 1.97.0
    ```
    (Or download `rustup-init.exe` from <https://rustup.rs/>.)
 
@@ -104,7 +107,21 @@ The Mac build is the free core, without the Pro pack, and does not update itself
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
-   Then restart your terminal (or `source "$HOME/.cargo/env"`).
+   The installer shows a menu and asks how to proceed: **just press Enter** (that picks
+   `1) Proceed with standard installation`). Typing `yes` or `y` cancels the install.
+
+3. **Load Rust into this terminal** — copy the whole line, the dot and the quotes included
+   (or close the terminal and open a new one instead):
+   ```bash
+   . "$HOME/.cargo/env"
+   ```
+
+4. **Pin the version** iAi is built with, then check it:
+   ```bash
+   rustup default 1.97.0
+   rustc --version
+   ```
+   The second command must print `rustc 1.97.0`.
 
 No additional libraries are needed — rendering uses Metal, which ships with macOS.
 
@@ -143,8 +160,10 @@ sudo pacman -S --needed git curl base-devel \
 Then **install Rust** via rustup (all distros):
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
+. "$HOME/.cargo/env"
+rustup default 1.97.0
 ```
+At the installer's menu, press Enter (typing `yes` cancels it).
 
 > Native Open/Save dialogs use the **XDG Desktop Portal**, so a portal backend
 > (`xdg-desktop-portal-gtk`, `-kde`, or `-gnome`) must be installed and running.
@@ -157,6 +176,9 @@ source "$HOME/.cargo/env"
 # Clone the repository
 git clone https://github.com/tongnghia2026/iai.git
 cd iai
+
+# Make sure this prints rustc 1.97.0 (see Installation)
+rustc --version
 
 # Build & run in release mode (strongly recommended for performance)
 cargo run --release --bin iai
@@ -196,6 +218,20 @@ cargo xtask lints
 > The first use of some **AI features** (Select Subject / Smart Fill) downloads
 > its ONNX model (tens of MB) to your local application-data directory. An internet
 > connection is required for that first download only.
+
+### Troubleshooting
+
+| What you see | What to do |
+|---|---|
+| `error: installation aborted` right after the rustup menu | You typed `yes`. Run the install command again and just press **Enter** at the menu. |
+| `zsh: permission denied: /Users/…/.cargo/env` | The line was run without its leading dot. Run `. "$HOME/.cargo/env"` exactly as written, dot first — or simply open a new terminal. |
+| `command not found: cargo` / `rustc` / `rustup` | Rust is not loaded into this terminal yet: open a new terminal (or run `. "$HOME/.cargo/env"`). |
+| `command not found: argo`, `ustup`, `it` … (first letter missing) | The terminal ate the first character when the line was pasted. Retype the command, or check that the line starts with the right letter before pressing Enter. |
+| `cargo run` could not determine which binary to run | Name the app: `cargo run --release --bin iai`. |
+| The build stops inside `ort-sys` / ONNX Runtime with a panic | Your Rust is newer than 1.97.0. Run `rustup default 1.97.0`, then build again. |
+| `git pull` says there are local changes | Throw them away and match GitHub: `git fetch origin`, then `git reset --hard origin/main`. |
+| You cloned your own fork and want the newest iAi | Add the main repository once — `git remote add upstream https://github.com/tongnghia2026/iai.git` — then update with `git pull upstream main`. |
+| On a Mac, the window opens but nothing reacts to clicks | Update to the newest code (fixed on 22 November 2026), or use the [Mac download](#download-for-macos-no-build-needed). |
 
 ---
 
