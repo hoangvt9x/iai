@@ -250,6 +250,8 @@ pub enum BrushParam {
     Scatter(f32),
     SizeJitter(f32),
     FlowJitter(f32),
+    /// The Brush's glow, 0..1.
+    Glow(f32),
 }
 
 /// Tool selection, options-bar edits, transform/crop/text session commands.

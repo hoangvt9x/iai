@@ -65,6 +65,7 @@ pub struct DynamicsPrefs {
     pub scatter: f32,
     pub size_jitter: f32,
     pub flow_jitter: f32,
+    pub glow: f32,
 }
 
 impl DynamicsPrefs {
@@ -73,6 +74,7 @@ impl DynamicsPrefs {
             scatter: d.scatter,
             size_jitter: d.size_jitter,
             flow_jitter: d.flow_jitter,
+            glow: d.glow,
         }
     }
 
@@ -81,6 +83,7 @@ impl DynamicsPrefs {
             scatter: self.scatter,
             size_jitter: self.size_jitter,
             flow_jitter: self.flow_jitter,
+            glow: self.glow,
         }
         .sanitized()
     }
@@ -239,6 +242,7 @@ mod tests {
             b.preset_idx = 1;
             b.dynamics.scatter = 1.5;
             b.dynamics.flow_jitter = 0.3;
+            b.dynamics.glow = 0.6;
         }
         tools.eraser_mut().size = 77.0;
         tools.burn.exposure = 0.12;
@@ -253,6 +257,7 @@ mod tests {
         assert_eq!(fresh.brush().settings.mode.name(), "Multiply");
         assert_eq!(fresh.brush().dynamics.scatter, 1.5);
         assert_eq!(fresh.brush().dynamics.flow_jitter, 0.3);
+        assert_eq!(fresh.brush().dynamics.glow, 0.6);
         assert_eq!(fresh.burn.range, ToneRange::Highlights);
         assert!(!fresh.dodge.protect_tones && fresh.burn.protect_tones);
     }

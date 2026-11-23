@@ -1711,6 +1711,9 @@ impl Tool for BrushTool {
             let (px, py, s) = self
                 .dynamics
                 .vary(&self.settings, &mut self.rng, sx, sy, None);
+            if let Some(halo) = self.dynamics.halo(&s, self.settings.dab_spacing()) {
+                Self::paint_cpu_dab(&halo, ctx.canvas_mut(), px, py);
+            }
             Self::paint_cpu_dab(&s, ctx.canvas_mut(), px, py);
             self.stroke_residual = self.settings.dab_spacing();
         } else {
@@ -1720,6 +1723,9 @@ impl Tool for BrushTool {
             let (px, py, s) = self
                 .dynamics
                 .vary(&self.settings, &mut self.rng, sx, sy, None);
+            if let Some(halo) = self.dynamics.halo(&s, self.settings.dab_spacing()) {
+                Self::paint_cpu_dab_stroked(&halo, ctx.canvas_mut(), px, py, stroke);
+            }
             Self::paint_cpu_dab_stroked(&s, ctx.canvas_mut(), px, py, stroke);
             stroke.residual = self.settings.dab_spacing();
         }
@@ -1767,6 +1773,10 @@ impl Tool for BrushTool {
                     let (px, py, s) = self
                         .dynamics
                         .vary(&self.settings, &mut self.rng, x, y, None);
+                    let spacing = self.settings.dab_spacing();
+                    if let Some(halo) = self.dynamics.halo(&s, spacing) {
+                        Self::paint_cpu_dab_stroked(&halo, ctx.canvas_mut(), px, py, stroke);
+                    }
                     Self::paint_cpu_dab_stroked(&s, ctx.canvas_mut(), px, py, stroke);
                 }
             }
@@ -1815,12 +1825,18 @@ impl BrushTool {
             let mut residual = stroke.residual;
             Self::walk_dabs(spacing, x0, y0, x1, y1, &mut residual, |x, y| {
                 let (px, py, s) = dynamics.vary(settings, rng, x, y, dir);
+                if let Some(halo) = dynamics.halo(&s, spacing) {
+                    Self::paint_cpu_dab_stroked(&halo, canvas, px, py, stroke);
+                }
                 Self::paint_cpu_dab_stroked(&s, canvas, px, py, stroke);
             });
             stroke.residual = residual;
         } else if alpha_plane {
             Self::walk_dabs(spacing, x0, y0, x1, y1, stroke_residual, |x, y| {
                 let (px, py, s) = dynamics.vary(settings, rng, x, y, dir);
+                if let Some(halo) = dynamics.halo(&s, spacing) {
+                    Self::paint_cpu_dab(&halo, canvas, px, py);
+                }
                 Self::paint_cpu_dab(&s, canvas, px, py);
             });
         }

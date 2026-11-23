@@ -1,7 +1,8 @@
 //! Brush dynamics (Photoshop's Scattering and Shape Dynamics / Transfer
 //! jitter): each dab of a Brush stroke may land off the stroke path and come
 //! out smaller or with less paint than the options bar says, by a random
-//! amount drawn per dab. All off (the default) paints exactly as before.
+//! amount drawn per dab, and may glow: a wide, faint, soft dab under each
+//! one. All off (the default) paints exactly as before.
 //!
 //! The random numbers come from a small seeded generator, so a stroke is
 //! reproducible from its seed (tests rely on that) and needs no global state.
@@ -18,6 +19,13 @@ const MIN_JITTER_SIZE: f32 = 1.0;
 /// Least paint a jittered dab keeps (a flow of 0 lays nothing).
 const MIN_JITTER_FLOW: f32 = 0.01;
 
+/// How much wider than its dab the glow reaches at 100 % Glow.
+const GLOW_REACH: f32 = 4.0;
+
+/// How much paint the glow lays across the stroke at 100 % Glow, before
+/// Flow (the halo dabs overlap, so each lays a share of this).
+const GLOW_PAINT: f32 = 1.0;
+
 /// How far and how much each dab may vary. 0 everywhere is off.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BrushDynamics {
@@ -28,6 +36,8 @@ pub struct BrushDynamics {
     pub size_jitter: f32,
     /// Share of the flow a dab may lose (0..1).
     pub flow_jitter: f32,
+    /// How far and how bright the glow round each dab is (0..1).
+    pub glow: f32,
 }
 
 impl BrushDynamics {
@@ -38,12 +48,35 @@ impl BrushDynamics {
             scatter: clamp(self.scatter, MAX_SCATTER),
             size_jitter: clamp(self.size_jitter, 1.0),
             flow_jitter: clamp(self.flow_jitter, 1.0),
+            glow: clamp(self.glow, 1.0),
         }
     }
 
     /// Whether every dab paints as the options bar says.
     pub fn is_off(&self) -> bool {
-        self.scatter <= 0.0 && self.size_jitter <= 0.0 && self.flow_jitter <= 0.0
+        self.scatter <= 0.0
+            && self.size_jitter <= 0.0
+            && self.flow_jitter <= 0.0
+            && self.glow <= 0.0
+    }
+
+    /// The glow under `dab` (as `vary` made it), on a stroke whose dabs are
+    /// `spacing` px apart; `None` without Glow. Soft and wide, and faint
+    /// enough per dab that the overlapping halos add up to about the same
+    /// glow at any spacing.
+    pub fn halo(&self, dab: &BrushSettings, spacing: f32) -> Option<BrushSettings> {
+        if self.glow <= 0.0 {
+            return None;
+        }
+        let size = dab.size * (1.0 + GLOW_REACH * self.glow);
+        let overlaps = (size / spacing.max(1.0)).max(1.0);
+        let flow = GLOW_PAINT * self.glow * dab.flow / overlaps;
+        Some(BrushSettings {
+            size,
+            hardness: 0.0,
+            flow: flow.clamp(0.001, 1.0),
+            ..dab.clone()
+        })
     }
 
     /// One dab aimed at `(x, y)` on a path heading along `dir` (any length;
@@ -215,10 +248,49 @@ mod tests {
             scatter: 1.0e9,
             size_jitter: -2.0,
             flow_jitter: f32::NAN,
+            glow: 3.0,
         }
         .sanitized();
         assert_eq!(d.scatter, MAX_SCATTER);
         assert_eq!(d.size_jitter, 0.0);
         assert_eq!(d.flow_jitter, 0.0);
+        assert_eq!(d.glow, 1.0);
+    }
+
+    #[test]
+    fn no_glow_lays_no_halo() {
+        let d = BrushDynamics::default();
+        assert!(d.halo(&settings(), 2.0).is_none());
+    }
+
+    #[test]
+    fn the_glow_is_wide_soft_and_faint() {
+        let d = BrushDynamics {
+            glow: 1.0,
+            ..BrushDynamics::default()
+        };
+        let dab = settings();
+        let halo = d.halo(&dab, 2.0).unwrap_or_default();
+        assert_eq!(halo.size, dab.size * (1.0 + GLOW_REACH));
+        assert_eq!(halo.hardness, 0.0);
+        assert!(halo.flow < 0.05, "faint per dab: {}", halo.flow);
+        assert_eq!(halo.color, dab.color);
+        assert!(!d.is_off());
+    }
+
+    #[test]
+    fn the_glow_adds_up_alike_at_any_spacing() {
+        let d = BrushDynamics {
+            glow: 0.5,
+            ..BrushDynamics::default()
+        };
+        let dab = settings();
+        // Paint across the stroke ~ flow per dab × dabs over the halo.
+        let total = |spacing: f32| {
+            let h = d.halo(&dab, spacing).unwrap_or_default();
+            h.flow * h.size / spacing
+        };
+        assert!((total(1.0) - total(5.0)).abs() < 1e-4);
+        assert!((total(1.0) - GLOW_PAINT * 0.5 * dab.flow).abs() < 1e-4);
     }
 }

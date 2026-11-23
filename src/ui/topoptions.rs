@@ -733,6 +733,12 @@ fn brush_dynamics_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions
                         100.0,
                         "How much less paint a dab may lay",
                     ),
+                    (
+                        "Glow:",
+                        d.glow,
+                        100.0,
+                        "A soft halo of the paint colour round the stroke",
+                    ),
                 ];
                 for (i, (label, value, max, tip)) in fields.into_iter().enumerate() {
                     ui.label(label).on_hover_text(tip);
@@ -750,7 +756,8 @@ fn brush_dynamics_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions
                         actions.tool.brush.push(match i {
                             0 => BrushParam::Scatter(v),
                             1 => BrushParam::SizeJitter(v),
-                            _ => BrushParam::FlowJitter(v),
+                            2 => BrushParam::FlowJitter(v),
+                            _ => BrushParam::Glow(v),
                         });
                     }
                     ui.end_row();
@@ -764,12 +771,13 @@ fn brush_dynamics_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions
                 BrushParam::Scatter(0.0),
                 BrushParam::SizeJitter(0.0),
                 BrushParam::FlowJitter(0.0),
+                BrushParam::Glow(0.0),
             ] {
                 actions.tool.brush.push(p);
             }
         }
     });
-    response.on_hover_text("Scatter dabs and vary their size and paint");
+    response.on_hover_text("Scatter dabs, vary their size and paint, add a glow");
 }
 
 /// The Brush's / Pencil's paint mode (Photoshop's Mode).

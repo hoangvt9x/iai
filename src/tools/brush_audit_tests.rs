@@ -349,3 +349,19 @@ fn without_dynamics_the_stroke_stays_on_its_path() {
     }
     assert_eq!(px(&doc, idx, 100, 60).3, 255);
 }
+
+#[test]
+fn glow_paints_a_faint_halo_round_the_stroke_and_undoes_with_it() {
+    let (mut doc, idx) = doc_with_layer(160, 100, [0, 0, 0, 0]);
+    let mut tools = brush(10.0, 1.0);
+    tools.brush_mut().dynamics.glow = 1.0;
+    stroke(&mut tools, &mut doc, &[ev(30.0, 50.0), ev(130.0, 50.0)]);
+    let core = px(&doc, idx, 80, 50).3;
+    // The 10 px dab reaches y 45..55; the glow (50 px) reaches past it.
+    let halo = px(&doc, idx, 80, 60).3;
+    assert_eq!(core, 255, "the stroke itself is painted as ever");
+    assert!(halo > 0 && halo < 200, "a faint glow beside it: {halo}");
+    assert_eq!(px(&doc, idx, 80, 92).3, 0, "nothing past the glow");
+    doc.canvas.undo();
+    assert_eq!(px(&doc, idx, 80, 60).3, 0, "one undo takes the glow too");
+}

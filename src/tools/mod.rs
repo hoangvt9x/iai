@@ -428,7 +428,8 @@ impl ToolManager {
                 | P::Airbrush(_)
                 | P::Scatter(_)
                 | P::SizeJitter(_)
-                | P::FlowJitter(_) => {}
+                | P::FlowJitter(_)
+                | P::Glow(_) => {}
             }
             return;
         }
@@ -446,6 +447,7 @@ impl ToolManager {
             P::Scatter(v) => b.dynamics.scatter = v,
             P::SizeJitter(v) => b.dynamics.size_jitter = v,
             P::FlowJitter(v) => b.dynamics.flow_jitter = v,
+            P::Glow(v) => b.dynamics.glow = v,
         }
         b.dynamics = b.dynamics.sanitized();
     }
